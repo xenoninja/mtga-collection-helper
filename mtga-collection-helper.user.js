@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MTGA Collection Helper
 // @namespace    https://github.com/xenoninja/mtga-collection-helper
-// @version      0.1.2
+// @version      0.1.3
 // @description  Compare a Moxfield deck with a processed MTGA collection.
 // @author       xenoninja
 // @homepageURL  https://github.com/xenoninja/mtga-collection-helper
@@ -461,7 +461,8 @@
     for (const list of lists) {
       const items = Array.from(list.children).filter(isVisible);
       const heading = items.shift();
-      const headingMatch = heading?.textContent
+      const headingLabel = heading?.querySelector("a, button") ?? heading;
+      const headingMatch = headingLabel?.textContent
         ?.trim()
         .match(/^(.+?)\s*\((\d+)\)\s*$/u);
       if (!heading || !headingMatch) {

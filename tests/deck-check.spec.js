@@ -10,7 +10,7 @@ const header = "Id,Name,Set,Color,Rarity,Count";
 
 /**
  * @typedef {{name: string, quantity: number | string, paintKey?: string}} DeckCard
- * @typedef {{name?: string, cards: DeckCard[], displayedCount?: number}} DeckGroup
+ * @typedef {{name?: string, cards: DeckCard[], displayedCount?: number, headingSuffix?: string}} DeckGroup
  * @typedef {{
  *   startingView?: "visual" | "condensedTable",
  *   startingGroup?: "type" | "tag",
@@ -41,7 +41,9 @@ function renderTextGroups(groups, keyPrefix) {
       const heading =
         group.name === undefined
           ? ""
-          : `<li><button type="button">${group.name} (${displayedCount})</button></li>`;
+          : `<li><button type="button">${group.name} (${displayedCount})</button>${
+              group.headingSuffix ? `<span>${group.headingSuffix}</span>` : ""
+            }</li>`;
       const rows = group.cards
         .map(
           (card, cardIndex) => `
@@ -490,6 +492,44 @@ test("combines every imported group and ignores non-imported and hidden groups",
   for (const group of excludedGroups) {
     await expect(result.getByText(group.cards[0].name, { exact: true })).toHaveCount(0);
   }
+});
+
+test("extracts lands when Moxfield annotates the heading with MDFC sources", async ({
+  page,
+}) => {
+  await mountDeck(page, [
+    {
+      name: "Sorceries",
+      cards: [{ name: "Agadeem's Awakening", quantity: 1 }],
+    },
+    {
+      name: "Lands",
+      headingSuffix: "· 3 including mdfc",
+      cards: [
+        { name: "Island", quantity: 1 },
+        { name: "Watery Grave", quantity: 1 },
+      ],
+    },
+  ]);
+  await uploadCollection(
+    page,
+    [
+      header,
+      "1,Agadeem's Awakening,ZNR,B,Mythic,0",
+      "2,Watery Grave,GRN,U,Rare,0",
+    ].join("\n"),
+  );
+
+  await page.getByRole("button", { name: "Check", exact: true }).click();
+
+  const result = page.getByRole("region", { name: "Deck check result" });
+  await expect(result).toContainText("2 missing copies across 2 distinct missing cards.");
+  await result.getByText("Missing card details (2)", { exact: true }).click();
+  await expect(
+    result.getByRole("row", { name: "Agadeem's Awakening 1 0 1 Mythic" }),
+  ).toBeVisible();
+  await expect(result.getByRole("row", { name: "Watery Grave 1 0 1 Rare" })).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveCount(0);
 });
 
 test("aggregates distinct painted rows for the same card name", async ({ page }) => {
