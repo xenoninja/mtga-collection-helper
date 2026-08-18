@@ -13,11 +13,14 @@ const header = "Id,Name,Set,Color,Rarity,Count";
  * @typedef {{name?: string, cards: DeckCard[], displayedCount?: number}} DeckGroup
  * @typedef {{
  *   startingView?: "visual" | "condensedTable",
+ *   startingGroup?: "type" | "tag",
+ *   taggedGroups?: DeckGroup[],
  *   hiddenResponsiveGroups?: DeckGroup[],
  *   additionalVisibleDeck?: boolean,
  *   renderText?: boolean,
  *   failRestoration?: boolean,
- *   renderDelay?: number
+ *   renderDelay?: number,
+ *   liveSemanticMount?: boolean
  * }} DeckOptions
  */
 
@@ -53,14 +56,23 @@ function renderTextGroups(groups, keyPrefix) {
     .join("");
 }
 
-function renderDeckListShell() {
-  return `<section data-testid="deck-list" aria-label="Deck list">
-    <h2>Deck List</h2>
+/** @param {boolean} liveSemanticMount */
+function renderDeckListShell(liveSemanticMount = false) {
+  const semanticAttributes = liveSemanticMount
+    ? ""
+    : ' data-testid="deck-list" aria-label="Deck list"';
+  return `<section${semanticAttributes}>
+    <h2 class="visually-hidden">Deck List</h2>
     <label for="viewMode">View</label>
     <select name="viewMode" id="viewMode">
       <option value="table">Text</option>
       <option value="condensedTable">Condensed Text</option>
       <option value="visual">Visual Grid</option>
+    </select>
+    <label for="groupBy">Group</label>
+    <select name="groupBy" id="groupBy">
+      <option value="type">Type</option>
+      <option value="tag">Type &amp; Tags</option>
     </select>
     <div id="rendered-deck"><p>Visual deck</p></div>
   </section>`;
@@ -74,13 +86,17 @@ function renderDeckListShell() {
 async function mountDeck(page, groups, options = {}) {
   const {
     startingView = "visual",
+    startingGroup = "type",
+    taggedGroups = groups,
     hiddenResponsiveGroups = [],
     additionalVisibleDeck = false,
     renderText = true,
     failRestoration = false,
     renderDelay = 25,
+    liveSemanticMount = false,
   } = options;
   const textGroups = renderTextGroups(groups, "active");
+  const taggedTextGroups = renderTextGroups(taggedGroups, "tagged");
   const hiddenGroups = renderTextGroups(hiddenResponsiveGroups, "hidden");
   const extraDeck = additionalVisibleDeck
     ? `<section aria-label="Deck list">
@@ -101,7 +117,7 @@ async function mountDeck(page, groups, options = {}) {
   await page.setContent(`
     <main>
       <h1>Example deck</h1>
-      ${renderDeckListShell()}
+      ${renderDeckListShell(liveSemanticMount)}
       <section aria-label="Deck list" hidden>
         <h2>Deck List</h2>
         ${hiddenGroups}
@@ -112,7 +128,9 @@ async function mountDeck(page, groups, options = {}) {
   await page.evaluate(
     ({
       initialView,
+      initialGroup,
       renderedTextGroups,
+      renderedTaggedTextGroups,
       shouldRenderText,
       shouldFailRestoration,
       fixtureRenderDelay,
@@ -124,28 +142,36 @@ async function mountDeck(page, groups, options = {}) {
       };
       scope.__deckFixture = {
         textGroups: renderedTextGroups,
+        taggedTextGroups: renderedTaggedTextGroups,
         renderText: shouldRenderText,
         failRestoration: shouldFailRestoration,
         renderDelay: fixtureRenderDelay,
       };
-      /** @param {string} initialView */
-      scope.__bindDeckFixture = (initialView) => {
+      /** @param {string} initialView @param {string} initialGroup */
+      scope.__bindDeckFixture = (initialView, initialGroup) => {
         const view = /** @type {HTMLSelectElement} */ (
           document.querySelector('select[name="viewMode"]')
+        );
+        const group = /** @type {HTMLSelectElement} */ (
+          document.querySelector('select[name="groupBy"]')
         );
         const renderedDeck = /** @type {HTMLElement} */ (
           document.querySelector("#rendered-deck")
         );
         const render = () => {
           if (view.value === "table" && scope.__deckFixture.renderText) {
-            renderedDeck.innerHTML = scope.__deckFixture.textGroups;
+            renderedDeck.innerHTML =
+              group.value === "type"
+                ? scope.__deckFixture.textGroups
+                : scope.__deckFixture.taggedTextGroups;
           } else {
             renderedDeck.innerHTML = `<p>${view.selectedOptions[0]?.textContent ?? "Deck"} deck</p>`;
           }
         };
         view.value = initialView;
+        group.value = initialGroup;
         render();
-        view.addEventListener("change", () => {
+        const scheduleRender = () => {
           setTimeout(() => {
             if (scope.__deckFixture.failRestoration && view.value !== "table") {
               view.value = "table";
@@ -153,13 +179,17 @@ async function mountDeck(page, groups, options = {}) {
             }
             render();
           }, scope.__deckFixture.renderDelay);
-        });
+        };
+        view.addEventListener("change", scheduleRender);
+        group.addEventListener("change", scheduleRender);
       };
-      scope.__bindDeckFixture(initialView);
+      scope.__bindDeckFixture(initialView, initialGroup);
     },
     {
       initialView: startingView,
+      initialGroup: startingGroup,
       renderedTextGroups: textGroups,
+      renderedTaggedTextGroups: taggedTextGroups,
       shouldRenderText: renderText,
       shouldFailRestoration: failRestoration,
       fixtureRenderDelay: renderDelay,
@@ -211,7 +241,7 @@ async function navigateDeckFixture(page, groups, options) {
       if (!main) throw new Error("Deck fixture has no main element.");
       main.innerHTML = `<h1>Example deck ${nextDeckId}</h1>${deckListHtml}`;
       scope.__deckFixture.renderDelay = 25;
-      scope.__bindDeckFixture(initialView);
+      scope.__bindDeckFixture(initialView, "type");
     },
     {
       nextDeckId: deckId,
@@ -235,6 +265,82 @@ async function uploadCollection(page, csv) {
   });
   await expect(page.getByRole("button", { name: "Check", exact: true })).toBeEnabled();
 }
+
+test("mounts beside the live semantic deck list without generated selectors", async ({
+  page,
+}) => {
+  await mountDeck(
+    page,
+    [{ name: "Creatures", cards: [{ name: "Llanowar Elves", quantity: 1 }] }],
+    { liveSemanticMount: true },
+  );
+
+  const helper = page.getByRole("region", { name: "MTGA Collection Helper" });
+  await expect(helper).toBeVisible();
+  await expect
+    .poll(() =>
+      helper.evaluate((element) => ({
+        tag: element.nextElementSibling?.tagName ?? null,
+        heading:
+          element.nextElementSibling?.querySelector(":scope > h2")?.textContent?.trim() ??
+          null,
+      })),
+    )
+    .toEqual({ tag: "SECTION", heading: "Deck List" });
+});
+
+test("mounts once when the React deck list renders after document idle", async ({ page }) => {
+  await page.exposeFunction("__gmGetValue", async (
+    /** @type {string} */ _key,
+    /** @type {unknown} */ fallback,
+  ) => fallback);
+  await page.exposeFunction("__gmSetValue", async () => {});
+  await page.route("https://www.moxfield.com/**", async (route) => {
+    await route.fulfill({ contentType: "text/html", body: "" });
+  });
+  await page.goto("https://www.moxfield.com/decks/deck-one");
+  await page.setContent('<div id="js-reactroot">Loading Moxfield.</div>');
+  await page.evaluate(() => {
+    const scope = /** @type {any} */ (globalThis);
+    scope.GM = {
+      getValue: scope.__gmGetValue,
+      setValue: scope.__gmSetValue,
+    };
+  });
+  await page.addScriptTag({ content: userscript });
+
+  await expect(page.locator("#mtga-collection-helper")).toHaveCount(0);
+  await page.locator("#js-reactroot").evaluate((root, deckListHtml) => {
+    root.innerHTML = `<main>${deckListHtml}</main>`;
+  }, renderDeckListShell(true));
+
+  const helper = page.getByRole("region", { name: "MTGA Collection Helper" });
+  await expect(helper).toBeVisible();
+  await expect(page.locator("#mtga-collection-helper")).toHaveCount(1);
+  await expect
+    .poll(() => helper.evaluate((element) => element.nextElementSibling?.tagName ?? null))
+    .toBe("SECTION");
+});
+
+test("uses Type grouping for extraction and restores the selected grouping", async ({
+  page,
+}) => {
+  await mountDeck(
+    page,
+    [{ name: "Creatures", cards: [{ name: "Llanowar Elves", quantity: 1 }] }],
+    {
+      startingGroup: "tag",
+      taggedGroups: [{ name: "Ramp", cards: [{ name: "Llanowar Elves", quantity: 1 }] }],
+    },
+  );
+  await uploadCollection(page, [header, "1,Llanowar Elves,FDN,G,Common,0"].join("\n"));
+
+  await page.getByRole("button", { name: "Check", exact: true }).click();
+
+  await expect(page.getByLabel("Group")).toHaveValue("tag");
+  const result = page.getByRole("region", { name: "Deck check result" });
+  await expect(result).toContainText("1 missing copies across 1 distinct missing cards.");
+});
 
 test("checks a mainboard deck after a click and restores the selected view", async ({
   page,
@@ -403,7 +509,33 @@ test("aggregates distinct painted rows for the same card name", async ({ page })
   const result = page.getByRole("region", { name: "Deck check result" });
   await expect(result).toContainText("2 missing copies across 1 distinct missing cards.");
   await result.getByText("Missing card details (1)", { exact: true }).click();
+
   await expect(result.getByRole("row", { name: "Shared Card 2 0 2 Common" })).toBeVisible();
+});
+test("aggregates one painted card across mainboard and sideboard", async ({ page }) => {
+  await mountDeck(page, [
+    {
+      name: "Enchantments",
+      cards: [{ name: "Eaten by Piranhas", quantity: 2, paintKey: "shared-printing" }],
+    },
+    {
+      name: "Sideboard",
+      cards: [{ name: "Eaten by Piranhas", quantity: 2, paintKey: "shared-printing" }],
+    },
+  ]);
+  await uploadCollection(
+    page,
+    [header, "1,Eaten by Piranhas,LCI,U,Common,0"].join("\n"),
+  );
+
+  await page.getByRole("button", { name: "Check", exact: true }).click();
+
+  const result = page.getByRole("region", { name: "Deck check result" });
+  await expect(result).toContainText("4 missing copies across 1 distinct missing cards.");
+  await result.getByText("Missing card details (1)", { exact: true }).click();
+  await expect(
+    result.getByRole("row", { name: "Eaten by Piranhas 4 0 4 Common" }),
+  ).toBeVisible();
 });
 
 test("calculates global playset requirements at each craft rarity", async ({ page }) => {
@@ -572,6 +704,20 @@ const extractionFailures = [
           { name: "Repeated Card", quantity: 1, paintKey: "same-painted-row" },
           { name: "Repeated Card", quantity: 1, paintKey: "same-painted-row" },
         ],
+      },
+    ],
+    error: "contains a duplicate painted row",
+  },
+  {
+    name: "duplicate painted row across repeated group lists",
+    groups: [
+      {
+        name: "Creatures",
+        cards: [{ name: "Repeated Card", quantity: 1, paintKey: "same-painted-row" }],
+      },
+      {
+        name: "Creatures",
+        cards: [{ name: "Repeated Card", quantity: 1, paintKey: "same-painted-row" }],
       },
     ],
     error: "contains a duplicate painted row",

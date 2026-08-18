@@ -19,7 +19,8 @@ const validCsv = [
  * @param {{
  *   getValueGate?: Promise<void>,
  *   onGetValueReturn?: () => void,
- *   setValueGate?: Promise<void>
+ *   setValueGate?: Promise<void>,
+ *   lexicalGrant?: boolean
  * }} [options]
  */
 async function mountHelper(page, storage = new Map(), options = {}) {
@@ -53,14 +54,24 @@ async function mountHelper(page, storage = new Map(), options = {}) {
       <section data-testid="deck-list" aria-label="Deck list"></section>
     </main>
   `);
-  await page.evaluate(() => {
-    const scope = /** @type {any} */ (globalThis);
-    scope.GM = {
-      getValue: scope.__gmGetValue,
-      setValue: scope.__gmSetValue,
-    };
-  });
-  await page.addScriptTag({ content: userscript });
+  if (options.lexicalGrant) {
+    await page.addScriptTag({
+      content: `const GM = {
+        getValue: globalThis.__gmGetValue,
+        setValue: globalThis.__gmSetValue,
+      };
+      ${userscript}`,
+    });
+  } else {
+    await page.evaluate(() => {
+      const scope = /** @type {any} */ (globalThis);
+      scope.GM = {
+        getValue: scope.__gmGetValue,
+        setValue: scope.__gmSetValue,
+      };
+    });
+    await page.addScriptTag({ content: userscript });
+  }
   return storage;
 }
 
@@ -77,6 +88,34 @@ async function uploadCsv(page, name, csv) {
   });
 }
 
+test("metadata installs only on top-level Moxfield deck pages", () => {
+  const metadata = userscript.match(/\/\/ ==UserScript==[\s\S]+?\/\/ ==\/UserScript==/u)?.[0];
+
+  expect(metadata).toBeTruthy();
+  if (!metadata) throw new Error("Userscript metadata block is missing.");
+  expect(
+    Array.from(metadata.matchAll(/^\/\/ @match\s+(\S+)$/gmu), (match) => match[1]),
+  ).toEqual([
+    "https://moxfield.com/decks/*",
+    "https://www.moxfield.com/decks/*",
+  ]);
+  expect(metadata).toContain("// @noframes");
+  expect(
+    Array.from(metadata.matchAll(/^\/\/ @grant\s+(\S+)$/gmu), (match) => match[1]),
+  ).toEqual(["GM.getValue", "GM.setValue"]);
+});
+
+
+test("uses Tampermonkey's userscript-scope GM grant", async ({ page }) => {
+  await mountHelper(page, new Map(), { lexicalGrant: true });
+
+  await uploadCsv(page, "collection.csv", validCsv);
+
+  await expect(page.getByRole("button", { name: "Check", exact: true })).toBeEnabled();
+  await expect(
+    page.getByRole("region", { name: "MTGA Collection Helper" }),
+  ).toContainText("2 unique card names");
+});
 test("uploads and restores a valid collection snapshot", async ({ page, context }) => {
   const storage = await mountHelper(page);
   const helper = page.getByRole("region", { name: "MTGA Collection Helper" });

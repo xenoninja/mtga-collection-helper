@@ -1,12 +1,14 @@
 // ==UserScript==
 // @name         MTGA Collection Helper
 // @namespace    https://github.com/xenoninja/mtga-collection-helper
-// @version      0.1.0
+// @version      0.1.1
 // @description  Compare a Moxfield deck with a processed MTGA collection.
+// @match        https://moxfield.com/decks/*
 // @match        https://www.moxfield.com/decks/*
 // @grant        GM.getValue
 // @grant        GM.setValue
 // @run-at       document-idle
+// @noframes
 // ==/UserScript==
 
 (() => {
@@ -64,7 +66,10 @@
   const tampermonkey = /** @type {{
     getValue: (key: string, fallback: unknown) => Promise<unknown> | unknown,
     setValue: (key: string, value: unknown) => Promise<void> | void
-  }} */ (/** @type {any} */ (globalThis).GM);
+  }} */ (
+    // @ts-expect-error GM is injected as a Tampermonkey userscript-scope binding.
+    GM
+  );
 
   /** @typedef {{count: number, craftRarity: CraftRarity}} CollectionEntry */
   /** @typedef {{filename: string, uniqueNameCount: number, uploadedAt: string}} SnapshotMetadata */
@@ -76,8 +81,6 @@
 
   if (document.querySelector("#mtga-collection-helper")) return;
 
-  const deckList = findDeckListMount();
-  if (!deckList?.parentElement) return;
   let activeDeckPath = location.pathname;
   let deckRevision = 0;
 
@@ -224,10 +227,27 @@
   }
 
   function findDeckListMount() {
+    const visibleDeckLists = findVisibleDeckLists();
+    if (visibleDeckLists.length === 1) return visibleDeckLists[0];
     return (
       document.querySelector('[data-testid="deck-list"]') ??
       document.querySelector('[aria-label="Deck list"]') ??
       document.querySelector("main")
+    );
+  }
+
+  /** @returns {HTMLElement[]} */
+  function findVisibleDeckLists() {
+    return Array.from(
+      new Set(
+        Array.from(document.querySelectorAll("h1,h2,h3"))
+          .filter((heading) => heading.textContent?.trim() === "Deck List")
+          .map((heading) => heading.closest("section"))
+          .filter(
+            /** @returns {section is HTMLElement} */
+            (section) => section instanceof HTMLElement && isVisible(section),
+          ),
+      ),
     );
   }
 
@@ -269,22 +289,37 @@
       if (!(viewControl instanceof HTMLSelectElement)) {
         throw new Error("Could not find Moxfield's View control.");
       }
+      const groupControl = activeDeckList.querySelector('select[name="groupBy"]');
+      if (!(groupControl instanceof HTMLSelectElement)) {
+        throw new Error("Could not find Moxfield's Group control.");
+      }
 
       const originalView = viewControl.value;
+      const originalGrouping = groupControl.value;
       /** @type {Map<string, DeckRequirementEntry> | null} */
       let requirement = null;
       /** @type {unknown} */
       let checkFailure = null;
       try {
-        if (originalView !== "table") selectView(viewControl, "table");
-        requirement = await waitForStableDeckRequirement(viewControl);
+        if (originalGrouping !== "type") selectControlValue(groupControl, "type");
+        if (originalView !== "table") selectControlValue(viewControl, "table");
+        requirement = await waitForStableDeckRequirement(viewControl, groupControl);
       } catch (cause) {
         checkFailure = cause;
       } finally {
-        if (originalView !== "table") {
+        const changedGrouping = originalGrouping !== "type";
+        const changedView = originalView !== "table";
+        if (changedGrouping || changedView) {
           try {
-            selectView(viewControl, originalView);
-            await waitForStableRenderedView(viewControl, activeDeckList, originalView);
+            if (changedGrouping) selectControlValue(groupControl, originalGrouping);
+            if (changedView) selectControlValue(viewControl, originalView);
+            await waitForStableRenderedView(
+              viewControl,
+              groupControl,
+              activeDeckList,
+              originalView,
+              originalGrouping,
+            );
           } catch (cause) {
             checkFailure = new Error(
               `Could not restore the Moxfield view: ${errorMessage(cause)}`,
@@ -312,40 +347,33 @@
 
   /** @returns {HTMLElement} */
   function findActiveDeckList() {
-    const candidates = new Set(
-      Array.from(document.querySelectorAll("h1,h2,h3"))
-        .filter((heading) => heading.textContent?.trim() === "Deck List")
-        .map((heading) => heading.closest("section"))
-        .filter(
-          /** @returns {section is HTMLElement} */
-          (section) => section instanceof HTMLElement && isVisible(section),
-        ),
-    );
-    if (candidates.size !== 1) {
+    const candidates = findVisibleDeckLists();
+    if (candidates.length !== 1) {
       throw new Error(
-        candidates.size === 0
+        candidates.length === 0
           ? "Could not find the active Moxfield deck list."
           : "Found more than one active Moxfield deck list.",
       );
     }
-    return /** @type {HTMLElement} */ (candidates.values().next().value);
+    return candidates[0];
   }
 
-  /** @param {HTMLSelectElement} viewControl @param {string} value */
-  function selectView(viewControl, value) {
-    if (!Array.from(viewControl.options).some((option) => option.value === value)) {
-      throw new Error(`Moxfield view "${value}" is unavailable.`);
+  /** @param {HTMLSelectElement} control @param {string} value */
+  function selectControlValue(control, value) {
+    if (!Array.from(control.options).some((option) => option.value === value)) {
+      throw new Error(`Moxfield option "${value}" is unavailable.`);
     }
-    viewControl.value = value;
-    viewControl.dispatchEvent(new Event("input", { bubbles: true }));
-    viewControl.dispatchEvent(new Event("change", { bubbles: true }));
+    control.value = value;
+    control.dispatchEvent(new Event("input", { bubbles: true }));
+    control.dispatchEvent(new Event("change", { bubbles: true }));
   }
 
   /**
    * @param {HTMLSelectElement} viewControl
+   * @param {HTMLSelectElement} groupControl
    * @returns {Promise<Map<string, DeckRequirementEntry>>}
    */
-  async function waitForStableDeckRequirement(viewControl) {
+  async function waitForStableDeckRequirement(viewControl, groupControl) {
     const deadline = Date.now() + 5_000;
     let previousSignature = "";
     let stableSamples = 0;
@@ -355,6 +383,9 @@
     while (Date.now() < deadline) {
       try {
         if (viewControl.value !== "table") throw new Error("Text view is not selected.");
+        if (groupControl.value !== "type") {
+          throw new Error("Type grouping is not selected.");
+        }
         const requirement = readDeckRequirement(findActiveDeckList());
         const signature = JSON.stringify(Array.from(requirement.entries()));
         if (signature === previousSignature) {
@@ -380,15 +411,23 @@
 
   /**
    * @param {HTMLSelectElement} viewControl
+   * @param {HTMLSelectElement} groupControl
    * @param {HTMLElement} activeDeckList
    * @param {string} expectedView
+   * @param {string} expectedGrouping
    */
-  async function waitForStableRenderedView(viewControl, activeDeckList, expectedView) {
+  async function waitForStableRenderedView(
+    viewControl,
+    groupControl,
+    activeDeckList,
+    expectedView,
+    expectedGrouping,
+  ) {
     const deadline = Date.now() + 5_000;
     let previousSignature = "";
     let stableSamples = 0;
     while (Date.now() < deadline) {
-      if (viewControl.value === expectedView) {
+      if (viewControl.value === expectedView && groupControl.value === expectedGrouping) {
         const signature = activeDeckList.textContent ?? "";
         if (signature === previousSignature) {
           stableSamples += 1;
@@ -413,7 +452,8 @@
 
     /** @type {Map<string, DeckRequirementEntry>} */
     const requirement = new Map();
-    const paintedRows = new Set();
+    /** @type {Map<string, Set<string>>} */
+    const paintedRowsByGroup = new Map();
     for (const list of lists) {
       const items = Array.from(list.children).filter(isVisible);
       const heading = items.shift();
@@ -426,6 +466,8 @@
 
       const groupName = headingMatch[1].trim().replace(/\s+/gu, " ").toLowerCase();
       if (!INCLUDED_DECK_GROUPS.has(groupName)) continue;
+      const paintedRows = paintedRowsByGroup.get(groupName) ?? new Set();
+      paintedRowsByGroup.set(groupName, paintedRows);
 
       const displayedCount = Number(headingMatch[2]);
       const groupHeading = headingMatch[1].trim();
