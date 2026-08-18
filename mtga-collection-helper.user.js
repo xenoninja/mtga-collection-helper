@@ -22,6 +22,19 @@
     "Rare",
     "Mythic",
   ]);
+  const FREE_BASIC_NAMES = new Set([
+    "plains",
+    "island",
+    "swamp",
+    "mountain",
+    "forest",
+    "wastes",
+    "snow-covered plains",
+    "snow-covered island",
+    "snow-covered swamp",
+    "snow-covered mountain",
+    "snow-covered forest",
+  ]);
   const INCLUDED_DECK_GROUPS = new Set([
     "artifact",
     "artifacts",
@@ -58,7 +71,8 @@
   /** @typedef {{version: 1, cards: Record<string, CollectionEntry>, metadata: SnapshotMetadata}} CollectionSnapshot */
   /** @typedef {{name: string, quantity: number}} DeckRequirementEntry */
   /** @typedef {{name: string, required: number, owned: number, missing: number, craftRarity: CraftRarity}} MissingCard */
-  /** @typedef {{totalMissing: number, missingCards: MissingCard[], wildcards: Record<Exclude<CraftRarity, "Basic">, number>}} CheckResult */
+  /** @typedef {{name: string, required: number, craftRarity: "Unknown", reason: "No collection match"}} UnmatchedCard */
+  /** @typedef {{totalMissing: number, missingCards: MissingCard[], unmatchedCards: UnmatchedCard[], wildcards: Record<Exclude<CraftRarity, "Basic">, number>}} CheckResult */
 
   if (document.querySelector("#mtga-collection-helper")) return;
 
@@ -405,19 +419,29 @@
     const wildcards = { Common: 0, Uncommon: 0, Rare: 0, Mythic: 0 };
     /** @type {MissingCard[]} */
     const missingCards = [];
+    /** @type {UnmatchedCard[]} */
+    const unmatchedCards = [];
     let totalMissing = 0;
 
     for (const [normalizedName, deckCard] of requirement) {
+      if (FREE_BASIC_NAMES.has(normalizedName)) continue;
       const collectionCard = snapshot.cards[normalizedName];
       if (!collectionCard) {
-        throw new Error(`No collection match for "${deckCard.name}".`);
+        unmatchedCards.push({
+          name: deckCard.name,
+          required: deckCard.quantity,
+          craftRarity: "Unknown",
+          reason: "No collection match",
+        });
+        continue;
       }
       if (collectionCard.craftRarity === "Basic") continue;
-      const missing = Math.max(deckCard.quantity - collectionCard.count, 0);
+      const playsetRequirement = Math.min(deckCard.quantity, 4);
+      const missing = Math.max(playsetRequirement - collectionCard.count, 0);
       if (missing === 0) continue;
       missingCards.push({
         name: deckCard.name,
-        required: deckCard.quantity,
+        required: playsetRequirement,
         owned: collectionCard.count,
         missing,
         craftRarity: collectionCard.craftRarity,
@@ -426,7 +450,8 @@
       wildcards[collectionCard.craftRarity] += missing;
     }
     missingCards.sort((left, right) => left.name.localeCompare(right.name));
-    return { totalMissing, missingCards, wildcards };
+    unmatchedCards.sort((left, right) => left.name.localeCompare(right.name));
+    return { totalMissing, missingCards, unmatchedCards, wildcards };
   }
 
   /** @param {CheckResult} result */
@@ -456,50 +481,69 @@
     }
     resultElement.append(heading, summary, wildcardList);
 
-    if (result.missingCards.length === 0) {
+    if (result.missingCards.length === 0 && result.unmatchedCards.length === 0) {
       const emptySuccess = document.createElement("p");
       emptySuccess.textContent = "Collection covers this deck. No missing copies.";
       emptySuccess.style.cssText = "margin:8px 0 0";
       resultElement.append(emptySuccess);
-    } else {
-      const details = document.createElement("details");
-      details.style.cssText = "margin-top:8px";
-      const detailsSummary = document.createElement("summary");
-      detailsSummary.textContent = `Missing card details (${result.missingCards.length})`;
-      const table = document.createElement("table");
-      table.style.cssText = "border-collapse:collapse;margin-top:6px;text-align:left";
-      const head = document.createElement("thead");
-      const headingRow = document.createElement("tr");
-      for (const label of ["Card name", "Required", "Owned", "Missing", "Craft rarity"]) {
-        const cell = document.createElement("th");
-        cell.scope = "col";
-        cell.textContent = label;
-        cell.style.paddingRight = "12px";
-        headingRow.append(cell);
-      }
-      head.append(headingRow);
-      const body = document.createElement("tbody");
-      for (const missingCard of result.missingCards) {
-        const row = document.createElement("tr");
-        for (const value of [
-          missingCard.name,
-          missingCard.required,
-          missingCard.owned,
-          missingCard.missing,
-          missingCard.craftRarity,
-        ]) {
-          const cell = document.createElement("td");
-          cell.textContent = String(value);
-          cell.style.paddingRight = "12px";
-          row.append(cell);
-        }
-        body.append(row);
-      }
-      table.append(head, body);
-      details.append(detailsSummary, table);
-      resultElement.append(details);
+    }
+    if (result.missingCards.length > 0) {
+      appendCardDetails(
+        `Missing card details (${result.missingCards.length})`,
+        ["Card name", "Required", "Owned", "Missing", "Craft rarity"],
+        result.missingCards,
+        (card) => [card.name, card.required, card.owned, card.missing, card.craftRarity],
+      );
+    }
+    if (result.unmatchedCards.length > 0) {
+      appendCardDetails(
+        `Unmatched card details (${result.unmatchedCards.length})`,
+        ["Card name", "Required", "Craft rarity", "Reason"],
+        result.unmatchedCards,
+        (card) => [card.name, card.required, card.craftRarity, card.reason],
+      );
     }
     resultElement.hidden = false;
+  }
+
+  /**
+   * @template T
+   * @param {string} summaryText
+   * @param {string[]} labels
+   * @param {T[]} cards
+   * @param {(card: T) => (string | number)[]} valuesForCard
+   */
+  function appendCardDetails(summaryText, labels, cards, valuesForCard) {
+    const details = document.createElement("details");
+    details.style.cssText = "margin-top:8px";
+    const detailsSummary = document.createElement("summary");
+    detailsSummary.textContent = summaryText;
+    const table = document.createElement("table");
+    table.style.cssText = "border-collapse:collapse;margin-top:6px;text-align:left";
+    const head = document.createElement("thead");
+    const headingRow = document.createElement("tr");
+    for (const label of labels) {
+      const cell = document.createElement("th");
+      cell.scope = "col";
+      cell.textContent = label;
+      cell.style.paddingRight = "12px";
+      headingRow.append(cell);
+    }
+    head.append(headingRow);
+    const body = document.createElement("tbody");
+    for (const card of cards) {
+      const row = document.createElement("tr");
+      for (const value of valuesForCard(card)) {
+        const cell = document.createElement("td");
+        cell.textContent = String(value);
+        cell.style.paddingRight = "12px";
+        row.append(cell);
+      }
+      body.append(row);
+    }
+    table.append(head, body);
+    details.append(detailsSummary, table);
+    resultElement.append(details);
   }
 
   function clearResult() {
@@ -594,7 +638,7 @@
       .normalize("NFKC")
       .replace(/[‘’‛ʼ]/gu, "'")
       .replace(/[‐‑‒–—―]/gu, "-")
-      .replace(/\s*\/{2}\s*/gu, " // ")
+      .replace(/\s*(?:[/⁄∕]\s*){1,2}/gu, " // ")
       .trim()
       .replace(/\s+/gu, " ")
       .toLocaleLowerCase("en-US");

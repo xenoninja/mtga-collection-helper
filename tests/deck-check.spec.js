@@ -348,6 +348,152 @@ test("aggregates distinct painted rows for the same card name", async ({ page })
   await expect(result.getByRole("row", { name: "Shared Card 2 0 2 Common" })).toBeVisible();
 });
 
+test("calculates global playset requirements at each craft rarity", async ({ page }) => {
+  await mountDeck(page, [
+    {
+      name: "Creatures",
+      cards: [
+        { name: "Common Zero", quantity: 1 },
+        { name: "Uncommon Partial", quantity: 3 },
+        { name: "Rare Complete", quantity: 2 },
+        { name: "Mythic Overplayset", quantity: 3 },
+      ],
+    },
+    {
+      name: "Sideboard",
+      cards: [{ name: "Mythic Overplayset", quantity: 3 }],
+    },
+  ]);
+  await uploadCollection(
+    page,
+    [
+      header,
+      "101,Common Zero,SET-A,W,Common,0",
+      "202,Uncommon Partial,SET-B,U,Uncommon,1",
+      "303,Rare Complete,SET-C,B,Rare,4",
+      "404,Mythic Overplayset,SET-D,R,Mythic,1",
+    ].join("\n"),
+  );
+
+  await page.getByRole("button", { name: "Check", exact: true }).click();
+
+  const result = page.getByRole("region", { name: "Deck check result" });
+  await expect(result).toContainText("6 missing copies across 3 distinct missing cards.");
+  const wildcards = result.locator("dl");
+  await expect(wildcards.getByText("Common", { exact: true }).locator("..")).toContainText("1");
+  await expect(wildcards.getByText("Uncommon", { exact: true }).locator("..")).toContainText("2");
+  await expect(wildcards.getByText("Rare", { exact: true }).locator("..")).toContainText("0");
+  await expect(wildcards.getByText("Mythic", { exact: true }).locator("..")).toContainText("3");
+  await result.getByText("Missing card details (3)", { exact: true }).click();
+  await expect(
+    result.getByRole("row", { name: "Mythic Overplayset 4 1 3 Mythic" }),
+  ).toBeVisible();
+  await expect(result.getByText("Rare Complete", { exact: true })).toHaveCount(0);
+});
+
+test("matches deterministic card-name normalization without fuzzy guesses", async ({ page }) => {
+  await mountDeck(page, [
+    {
+      name: "Instants",
+      cards: [
+        { name: "  KAYA’S   GUILE  ", quantity: 1 },
+        { name: "Wear / Tear", quantity: 1 },
+        { name: "Fire ∕ Ice", quantity: 1 },
+        { name: "Dash—Named Card", quantity: 1 },
+      ],
+    },
+  ]);
+  await uploadCollection(
+    page,
+    [
+      header,
+      "1,kaya's guile,TST,W,Rare,4",
+      "2,Wear // Tear,TST,R,Uncommon,4",
+      "3,Fire // Ice,TST,U,Uncommon,4",
+      "4,dash-named card,TST,C,Common,4",
+    ].join("\n"),
+  );
+
+  await page.getByRole("button", { name: "Check", exact: true }).click();
+
+  const result = page.getByRole("region", { name: "Deck check result" });
+  await expect(result).toContainText("0 missing copies across 0 distinct missing cards.");
+  await expect(result).toContainText("Collection covers this deck. No missing copies.");
+});
+
+test("treats named basics and every Basic-rarity collection entry as free", async ({ page }) => {
+  const freelyAvailableBasics = [
+    "Plains",
+    "Island",
+    "Swamp",
+    "Mountain",
+    "Forest",
+    "Wastes",
+    "Snow-Covered Plains",
+    "Snow-Covered Island",
+    "Snow-Covered Swamp",
+    "Snow-Covered Mountain",
+    "Snow-Covered Forest",
+    "Special Basic",
+  ];
+  await mountDeck(page, [
+    {
+      name: "Lands",
+      cards: freelyAvailableBasics.map((name) => ({ name, quantity: 20 })),
+    },
+  ]);
+  await uploadCollection(
+    page,
+    [header, "1,Special Basic,TST,C,Basic,0"].join("\n"),
+  );
+
+  await page.getByRole("button", { name: "Check", exact: true }).click();
+
+  const result = page.getByRole("region", { name: "Deck check result" });
+  await expect(result).toContainText("0 missing copies across 0 distinct missing cards.");
+  await expect(result).toContainText("Collection covers this deck. No missing copies.");
+  await expect(result.getByText(/card details/i)).toHaveCount(0);
+});
+
+test("reports aggregated unmatched cards separately from known requirements", async ({ page }) => {
+  await mountDeck(page, [
+    {
+      name: "Creatures",
+      cards: [
+        { name: "Lightning Bolt", quantity: 2 },
+        { name: "Similar Card", quantity: 3 },
+      ],
+    },
+    {
+      name: "Sideboard",
+      cards: [{ name: "  similar   card  ", quantity: 2 }],
+    },
+  ]);
+  await uploadCollection(
+    page,
+    [
+      header,
+      "1,Lightning Bolt,TST,R,Common,1",
+      "2,Similar Cards,TST,U,Rare,4",
+    ].join("\n"),
+  );
+
+  await page.getByRole("button", { name: "Check", exact: true }).click();
+
+  const result = page.getByRole("region", { name: "Deck check result" });
+  await expect(result).toContainText("1 missing copies across 1 distinct missing cards.");
+  const wildcards = result.locator("dl");
+  await expect(wildcards.getByText("Common", { exact: true }).locator("..")).toContainText("1");
+  await expect(wildcards.getByText("Rare", { exact: true }).locator("..")).toContainText("0");
+  await result.getByText("Unmatched card details (1)", { exact: true }).click();
+  await expect(
+    result.getByRole("row", {
+      name: "Similar Card 5 Unknown No collection match",
+    }),
+  ).toBeVisible();
+  await expect(result.getByText("Similar Cards", { exact: true })).toHaveCount(0);
+});
+
 const extractionFailures = [
   {
     name: "missing heading",
