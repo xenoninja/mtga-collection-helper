@@ -7,9 +7,11 @@ It runs only on Moxfield deck pages (`https://moxfield.com/decks/*` and `https:/
 ## Install
 
 1. Install [Tampermonkey](https://www.tampermonkey.net/) in Chrome.
-2. Open Tampermonkey → **Create a new script**.
-3. Replace the template with the contents of [`mtga-collection-helper.user.js`](mtga-collection-helper.user.js) and save.
+2. Open [**Install this script**](https://github.com/xenoninja/mtga-collection-helper/raw/master/mtga-collection-helper.user.js). Tampermonkey intercepts the `.user.js` URL and shows its install page.
+3. Confirm **Install**.
 4. Open any Moxfield deck. The helper mounts next to the deck list.
+
+That install tracks `master` and receives version bumps. Copy-pasting [`mtga-collection-helper.user.js`](mtga-collection-helper.user.js) into a new script skips updates.
 
 The collection snapshot lives in Tampermonkey storage (`mtga-collection-helper.collection-snapshot`). Reinstalling the script or using another browser profile starts empty.
 

@@ -100,6 +100,17 @@ test("metadata installs only on top-level Moxfield deck pages", () => {
     "https://www.moxfield.com/decks/*",
   ]);
   expect(metadata).toContain("// @noframes");
+  const rawScriptUrl =
+    "https://raw.githubusercontent.com/xenoninja/mtga-collection-helper/master/mtga-collection-helper.user.js";
+  expect(
+    Array.from(
+      metadata.matchAll(/^\/\/ @(downloadURL|updateURL)\s+(\S+)$/gmu),
+      (match) => [match[1], match[2]],
+    ),
+  ).toEqual([
+    ["downloadURL", rawScriptUrl],
+    ["updateURL", rawScriptUrl],
+  ]);
   expect(
     Array.from(metadata.matchAll(/^\/\/ @grant\s+(\S+)$/gmu), (match) => match[1]),
   ).toEqual(["GM.getValue", "GM.setValue"]);
