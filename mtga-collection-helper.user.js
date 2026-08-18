@@ -30,6 +30,9 @@
   /** @typedef {{count: number, craftRarity: CraftRarity}} CollectionEntry */
   /** @typedef {{filename: string, uniqueNameCount: number, uploadedAt: string}} SnapshotMetadata */
   /** @typedef {{version: 1, cards: Record<string, CollectionEntry>, metadata: SnapshotMetadata}} CollectionSnapshot */
+  /** @typedef {{name: string, quantity: number}} DeckRequirementEntry */
+  /** @typedef {{name: string, required: number, owned: number, missing: number, craftRarity: CraftRarity}} MissingCard */
+  /** @typedef {{totalMissing: number, missingCards: MissingCard[], wildcards: Record<Exclude<CraftRarity, "Basic">, number>}} CheckResult */
 
   if (document.querySelector("#mtga-collection-helper")) return;
 
@@ -101,8 +104,13 @@
   error.hidden = true;
   error.style.cssText = "color:#b91c1c;margin:10px 0 0";
 
+  const resultElement = document.createElement("section");
+  resultElement.setAttribute("role", "region");
+  resultElement.setAttribute("aria-label", "Deck check result");
+  resultElement.hidden = true;
+
   controls.append(uploadLabel, checkButton);
-  surface.append(title, controls, metadataElement, error);
+  surface.append(title, controls, metadataElement, error, resultElement);
   deckList.parentElement.insertBefore(surface, deckList);
 
   const restoration = restoreSnapshot();
@@ -110,6 +118,9 @@
   void restoration.finally(() => {
     if (pendingWork === restoration) uploadInput.disabled = false;
   });
+  /** @type {CollectionSnapshot | null} */
+  let activeSnapshot = null;
+  let checkInProgress = false;
   uploadInput.addEventListener("change", () => {
     const file = uploadInput.files?.[0];
     if (!file) return;
@@ -121,6 +132,10 @@
     void upload.finally(() => {
       if (pendingWork === upload) uploadInput.disabled = false;
     });
+  });
+  checkButton.addEventListener("click", () => {
+    if (!activeSnapshot || checkInProgress) return;
+    void handleCheck(activeSnapshot);
   });
 
   async function restoreSnapshot() {
@@ -143,6 +158,325 @@
     } catch (cause) {
       showError(errorMessage(cause));
     }
+  }
+
+  /** @param {CollectionSnapshot} snapshot */
+  async function handleCheck(snapshot) {
+    checkInProgress = true;
+    checkButton.disabled = true;
+    checkButton.textContent = "Checking…";
+    uploadInput.disabled = true;
+    hideError();
+    clearResult();
+
+    try {
+      const activeDeckList = findActiveDeckList();
+      const viewControl = activeDeckList.querySelector('select[name="viewMode"]');
+      if (!(viewControl instanceof HTMLSelectElement)) {
+        throw new Error("Could not find Moxfield's View control.");
+      }
+
+      const originalView = viewControl.value;
+      /** @type {Map<string, DeckRequirementEntry> | null} */
+      let requirement = null;
+      /** @type {unknown} */
+      let checkFailure = null;
+      try {
+        if (originalView !== "table") selectView(viewControl, "table");
+        requirement = await waitForStableDeckRequirement(viewControl);
+      } catch (cause) {
+        checkFailure = cause;
+      } finally {
+        if (originalView !== "table") {
+          try {
+            selectView(viewControl, originalView);
+            await waitForStableRenderedView(viewControl, activeDeckList, originalView);
+          } catch (cause) {
+            checkFailure = new Error(
+              `Could not restore the Moxfield view: ${errorMessage(cause)}`,
+            );
+          }
+        }
+      }
+
+      if (checkFailure) throw checkFailure;
+      if (!requirement) throw new Error("Could not read the rendered deck list.");
+      renderResult(compareRequirement(requirement, snapshot));
+    } catch (cause) {
+      showError(`Could not check this deck: ${errorMessage(cause)}`);
+    } finally {
+      checkInProgress = false;
+      checkButton.textContent = "Check";
+      checkButton.disabled = activeSnapshot === null;
+      uploadInput.disabled = false;
+    }
+  }
+
+  /** @returns {HTMLElement} */
+  function findActiveDeckList() {
+    const candidates = new Set(
+      Array.from(document.querySelectorAll("h1,h2,h3"))
+        .filter((heading) => heading.textContent?.trim() === "Deck List")
+        .map((heading) => heading.closest("section"))
+        .filter(
+          /** @returns {section is HTMLElement} */
+          (section) => section instanceof HTMLElement && isVisible(section),
+        ),
+    );
+    if (candidates.size !== 1) {
+      throw new Error(
+        candidates.size === 0
+          ? "Could not find the active Moxfield deck list."
+          : "Found more than one active Moxfield deck list.",
+      );
+    }
+    return /** @type {HTMLElement} */ (candidates.values().next().value);
+  }
+
+  /** @param {HTMLSelectElement} viewControl @param {string} value */
+  function selectView(viewControl, value) {
+    if (!Array.from(viewControl.options).some((option) => option.value === value)) {
+      throw new Error(`Moxfield view "${value}" is unavailable.`);
+    }
+    viewControl.value = value;
+    viewControl.dispatchEvent(new Event("input", { bubbles: true }));
+    viewControl.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  /**
+   * @param {HTMLSelectElement} viewControl
+   * @returns {Promise<Map<string, DeckRequirementEntry>>}
+   */
+  async function waitForStableDeckRequirement(viewControl) {
+    const deadline = Date.now() + 5_000;
+    let previousSignature = "";
+    let stableSamples = 0;
+    /** @type {unknown} */
+    let lastFailure = null;
+
+    while (Date.now() < deadline) {
+      try {
+        if (viewControl.value !== "table") throw new Error("Text view is not selected.");
+        const requirement = readDeckRequirement(findActiveDeckList());
+        const signature = JSON.stringify(Array.from(requirement.entries()));
+        if (signature === previousSignature) {
+          stableSamples += 1;
+          if (stableSamples >= 1) return requirement;
+        } else {
+          previousSignature = signature;
+          stableSamples = 0;
+        }
+        lastFailure = null;
+      } catch (cause) {
+        previousSignature = "";
+        stableSamples = 0;
+        lastFailure = cause;
+      }
+      await delay(50);
+    }
+
+    throw new Error(
+      `Moxfield Text view did not stabilize: ${errorMessage(lastFailure ?? "timed out")}`,
+    );
+  }
+
+  /**
+   * @param {HTMLSelectElement} viewControl
+   * @param {HTMLElement} activeDeckList
+   * @param {string} expectedView
+   */
+  async function waitForStableRenderedView(viewControl, activeDeckList, expectedView) {
+    const deadline = Date.now() + 5_000;
+    let previousSignature = "";
+    let stableSamples = 0;
+    while (Date.now() < deadline) {
+      if (viewControl.value === expectedView) {
+        const signature = activeDeckList.textContent ?? "";
+        if (signature === previousSignature) {
+          stableSamples += 1;
+          if (stableSamples >= 1) return;
+        } else {
+          previousSignature = signature;
+          stableSamples = 0;
+        }
+      }
+      await delay(50);
+    }
+    throw new Error(`Moxfield view "${expectedView}" did not stabilize.`);
+  }
+
+  /**
+   * @param {HTMLElement} activeDeckList
+   * @returns {Map<string, DeckRequirementEntry>}
+   */
+  function readDeckRequirement(activeDeckList) {
+    const lists = Array.from(activeDeckList.querySelectorAll("article ul")).filter(isVisible);
+    if (lists.length === 0) throw new Error("Text view has no visible deck groups.");
+
+    /** @type {Map<string, DeckRequirementEntry>} */
+    const requirement = new Map();
+    for (const list of lists) {
+      const items = Array.from(list.children).filter(isVisible);
+      const heading = items.shift();
+      const countMatch = heading?.textContent?.trim().match(/\((\d+)\)\s*$/u);
+      if (!heading || !countMatch) {
+        throw new Error("A visible deck group has no displayed card count.");
+      }
+      const displayedCount = Number(countMatch[1]);
+      let extractedCount = 0;
+      for (const row of items) {
+        const cardLink = row.querySelector('a[href^="/cards/"]');
+        const quantityText = row.firstElementChild?.textContent?.trim() ?? "";
+        if (!(cardLink instanceof HTMLAnchorElement) || !cardLink.textContent?.trim()) {
+          throw new Error("A visible deck row has no card name.");
+        }
+        if (!/^\d+$/u.test(quantityText) || Number(quantityText) < 1) {
+          throw new Error(`Could not read the quantity for "${cardLink.textContent.trim()}".`);
+        }
+
+        const quantity = Number(quantityText);
+        const name = cardLink.textContent.trim().replace(/\s+/gu, " ");
+        const normalizedName = normalizeName(name);
+        const existing = requirement.get(normalizedName);
+        if (existing) existing.quantity += quantity;
+        else requirement.set(normalizedName, { name, quantity });
+        extractedCount += quantity;
+      }
+      if (extractedCount !== displayedCount) {
+        throw new Error(
+          `Deck group count mismatch: Moxfield shows ${displayedCount}, but ${extractedCount} copies were read.`,
+        );
+      }
+    }
+    return requirement;
+  }
+
+  /**
+   * @param {Map<string, DeckRequirementEntry>} requirement
+   * @param {CollectionSnapshot} snapshot
+   * @returns {CheckResult}
+   */
+  function compareRequirement(requirement, snapshot) {
+    /** @type {CheckResult["wildcards"]} */
+    const wildcards = { Common: 0, Uncommon: 0, Rare: 0, Mythic: 0 };
+    /** @type {MissingCard[]} */
+    const missingCards = [];
+    let totalMissing = 0;
+
+    for (const [normalizedName, deckCard] of requirement) {
+      const collectionCard = snapshot.cards[normalizedName];
+      if (!collectionCard) {
+        throw new Error(`No collection match for "${deckCard.name}".`);
+      }
+      if (collectionCard.craftRarity === "Basic") continue;
+      const missing = Math.max(deckCard.quantity - collectionCard.count, 0);
+      if (missing === 0) continue;
+      missingCards.push({
+        name: deckCard.name,
+        required: deckCard.quantity,
+        owned: collectionCard.count,
+        missing,
+        craftRarity: collectionCard.craftRarity,
+      });
+      totalMissing += missing;
+      wildcards[collectionCard.craftRarity] += missing;
+    }
+    missingCards.sort((left, right) => left.name.localeCompare(right.name));
+    return { totalMissing, missingCards, wildcards };
+  }
+
+  /** @param {CheckResult} result */
+  function renderResult(result) {
+    resultElement.replaceChildren();
+    const heading = document.createElement("h3");
+    heading.textContent = "Deck check result";
+    heading.style.cssText = "font-size:15px;margin:12px 0 6px";
+
+    const summary = document.createElement("p");
+    summary.style.cssText = "margin:0 0 8px";
+    summary.textContent = `${result.totalMissing} missing copies across ${result.missingCards.length} distinct missing cards.`;
+
+    const wildcardList = document.createElement("dl");
+    wildcardList.style.cssText =
+      "display:grid;grid-template-columns:auto auto;gap:2px 12px;width:max-content;margin:0";
+    for (const rarity of /** @type {const} */ (["Common", "Uncommon", "Rare", "Mythic"])) {
+      const row = document.createElement("div");
+      row.style.display = "contents";
+      const term = document.createElement("dt");
+      term.textContent = rarity;
+      const count = document.createElement("dd");
+      count.textContent = String(result.wildcards[rarity]);
+      count.style.margin = "0";
+      row.append(term, count);
+      wildcardList.append(row);
+    }
+    resultElement.append(heading, summary, wildcardList);
+
+    if (result.missingCards.length === 0) {
+      const emptySuccess = document.createElement("p");
+      emptySuccess.textContent = "Collection covers this deck. No missing copies.";
+      emptySuccess.style.cssText = "margin:8px 0 0";
+      resultElement.append(emptySuccess);
+    } else {
+      const details = document.createElement("details");
+      details.style.cssText = "margin-top:8px";
+      const detailsSummary = document.createElement("summary");
+      detailsSummary.textContent = `Missing card details (${result.missingCards.length})`;
+      const table = document.createElement("table");
+      table.style.cssText = "border-collapse:collapse;margin-top:6px;text-align:left";
+      const head = document.createElement("thead");
+      const headingRow = document.createElement("tr");
+      for (const label of ["Card name", "Required", "Owned", "Missing", "Craft rarity"]) {
+        const cell = document.createElement("th");
+        cell.scope = "col";
+        cell.textContent = label;
+        cell.style.paddingRight = "12px";
+        headingRow.append(cell);
+      }
+      head.append(headingRow);
+      const body = document.createElement("tbody");
+      for (const missingCard of result.missingCards) {
+        const row = document.createElement("tr");
+        for (const value of [
+          missingCard.name,
+          missingCard.required,
+          missingCard.owned,
+          missingCard.missing,
+          missingCard.craftRarity,
+        ]) {
+          const cell = document.createElement("td");
+          cell.textContent = String(value);
+          cell.style.paddingRight = "12px";
+          row.append(cell);
+        }
+        body.append(row);
+      }
+      table.append(head, body);
+      details.append(detailsSummary, table);
+      resultElement.append(details);
+    }
+    resultElement.hidden = false;
+  }
+
+  function clearResult() {
+    resultElement.replaceChildren();
+    resultElement.hidden = true;
+  }
+
+  /** @param {Element} element */
+  function isVisible(element) {
+    return (
+      element instanceof HTMLElement &&
+      !element.hidden &&
+      element.getAttribute("aria-hidden") !== "true" &&
+      getComputedStyle(element).display !== "none" &&
+      element.getClientRects().length > 0
+    );
+  }
+
+  /** @param {number} milliseconds */
+  function delay(milliseconds) {
+    return new Promise((resolve) => setTimeout(resolve, milliseconds));
   }
 
   /**
@@ -299,6 +633,7 @@
 
   /** @param {CollectionSnapshot} snapshot */
   function setActiveSnapshot(snapshot) {
+    activeSnapshot = snapshot;
     checkButton.disabled = false;
     renderMetadata(snapshot.metadata);
   }
