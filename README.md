@@ -31,11 +31,11 @@ Rules the userscript enforces:
 
 `Rarity` is used as craft rarity. Preprocessing must pick the lowest-rarity interchangeable Arena printing for each name.
 
-This working tree keeps local collection files under `collection/` (gitignored):
+This working tree keeps local collection files under `collection/` (gitignored). Save Untapped.gg's **Export collection** CSV as `collection/collection_raw.csv`. Arena's official collection export is a different schema and is not valid input to the merge script or the userscript.
 
 | File | Role |
 | --- | --- |
-| `collection/collection_raw.csv` | Multi-printing source (`Id,Name,Set,Color,Rarity,Count,PrintCount`) |
+| `collection/collection_raw.csv` | Untapped.gg **Export collection** dump (`Id,Name,Set,Color,Rarity,Count,PrintCount`) |
 | `collection/collection.csv` | One row per name — upload this |
 | `collection/merge_collection.py` | Merges same-name printings, keeping the preferred rarity |
 
