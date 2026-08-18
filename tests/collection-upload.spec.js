@@ -43,6 +43,10 @@ async function mountHelper(page, storage = new Map(), options = {}) {
   };
   await page.exposeFunction("__gmGetValue", getValue);
   await page.exposeFunction("__gmSetValue", setValue);
+  await page.route("https://www.moxfield.com/**", async (route) => {
+    await route.fulfill({ contentType: "text/html", body: "" });
+  });
+  await page.goto("https://www.moxfield.com/decks/deck-one");
   await page.setContent(`
     <main>
       <h1>Example deck</h1>

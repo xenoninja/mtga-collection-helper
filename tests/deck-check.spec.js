@@ -16,7 +16,8 @@ const header = "Id,Name,Set,Color,Rarity,Count";
  *   hiddenResponsiveGroups?: DeckGroup[],
  *   additionalVisibleDeck?: boolean,
  *   renderText?: boolean,
- *   failRestoration?: boolean
+ *   failRestoration?: boolean,
+ *   renderDelay?: number
  * }} DeckOptions
  */
 
@@ -52,6 +53,19 @@ function renderTextGroups(groups, keyPrefix) {
     .join("");
 }
 
+function renderDeckListShell() {
+  return `<section data-testid="deck-list" aria-label="Deck list">
+    <h2>Deck List</h2>
+    <label for="viewMode">View</label>
+    <select name="viewMode" id="viewMode">
+      <option value="table">Text</option>
+      <option value="condensedTable">Condensed Text</option>
+      <option value="visual">Visual Grid</option>
+    </select>
+    <div id="rendered-deck"><p>Visual deck</p></div>
+  </section>`;
+}
+
 /**
  * @param {import("@playwright/test").Page} page
  * @param {DeckGroup[]} groups
@@ -64,6 +78,7 @@ async function mountDeck(page, groups, options = {}) {
     additionalVisibleDeck = false,
     renderText = true,
     failRestoration = false,
+    renderDelay = 25,
   } = options;
   const textGroups = renderTextGroups(groups, "active");
   const hiddenGroups = renderTextGroups(hiddenResponsiveGroups, "hidden");
@@ -79,19 +94,14 @@ async function mountDeck(page, groups, options = {}) {
     /** @type {unknown} */ fallback,
   ) => fallback);
   await page.exposeFunction("__gmSetValue", async () => {});
+  await page.route("https://www.moxfield.com/**", async (route) => {
+    await route.fulfill({ contentType: "text/html", body: "" });
+  });
+  await page.goto("https://www.moxfield.com/decks/deck-one");
   await page.setContent(`
     <main>
       <h1>Example deck</h1>
-      <section data-testid="deck-list" aria-label="Deck list">
-        <h2>Deck List</h2>
-        <label for="viewMode">View</label>
-        <select name="viewMode" id="viewMode">
-          <option value="table">Text</option>
-          <option value="condensedTable">Condensed Text</option>
-          <option value="visual">Visual Grid</option>
-        </select>
-        <div id="rendered-deck"><p>Visual deck</p></div>
-      </section>
+      ${renderDeckListShell()}
       <section aria-label="Deck list" hidden>
         <h2>Deck List</h2>
         ${hiddenGroups}
@@ -100,7 +110,13 @@ async function mountDeck(page, groups, options = {}) {
     </main>
   `);
   await page.evaluate(
-    ({ initialView, renderedTextGroups, shouldRenderText, shouldFailRestoration }) => {
+    ({
+      initialView,
+      renderedTextGroups,
+      shouldRenderText,
+      shouldFailRestoration,
+      fixtureRenderDelay,
+    }) => {
       const scope = /** @type {any} */ (globalThis);
       scope.GM = {
         getValue: scope.__gmGetValue,
@@ -110,37 +126,43 @@ async function mountDeck(page, groups, options = {}) {
         textGroups: renderedTextGroups,
         renderText: shouldRenderText,
         failRestoration: shouldFailRestoration,
+        renderDelay: fixtureRenderDelay,
       };
-      const view = /** @type {HTMLSelectElement} */ (
-        document.querySelector('select[name="viewMode"]')
-      );
-      const renderedDeck = /** @type {HTMLElement} */ (
-        document.querySelector("#rendered-deck")
-      );
-      const render = () => {
-        if (view.value === "table" && scope.__deckFixture.renderText) {
-          renderedDeck.innerHTML = scope.__deckFixture.textGroups;
-        } else {
-          renderedDeck.innerHTML = `<p>${view.selectedOptions[0]?.textContent ?? "Deck"} deck</p>`;
-        }
-      };
-      view.value = initialView;
-      render();
-      view.addEventListener("change", () => {
-        setTimeout(() => {
-          if (scope.__deckFixture.failRestoration && view.value !== "table") {
-            view.value = "table";
-            return;
+      /** @param {string} initialView */
+      scope.__bindDeckFixture = (initialView) => {
+        const view = /** @type {HTMLSelectElement} */ (
+          document.querySelector('select[name="viewMode"]')
+        );
+        const renderedDeck = /** @type {HTMLElement} */ (
+          document.querySelector("#rendered-deck")
+        );
+        const render = () => {
+          if (view.value === "table" && scope.__deckFixture.renderText) {
+            renderedDeck.innerHTML = scope.__deckFixture.textGroups;
+          } else {
+            renderedDeck.innerHTML = `<p>${view.selectedOptions[0]?.textContent ?? "Deck"} deck</p>`;
           }
-          render();
-        }, 25);
-      });
+        };
+        view.value = initialView;
+        render();
+        view.addEventListener("change", () => {
+          setTimeout(() => {
+            if (scope.__deckFixture.failRestoration && view.value !== "table") {
+              view.value = "table";
+              return;
+            }
+            render();
+          }, scope.__deckFixture.renderDelay);
+        });
+      };
+      scope.__bindDeckFixture(initialView);
     },
     {
       initialView: startingView,
       renderedTextGroups: textGroups,
       shouldRenderText: renderText,
       shouldFailRestoration: failRestoration,
+      fixtureRenderDelay: renderDelay,
     },
   );
   await page.addScriptTag({ content: userscript });
@@ -161,6 +183,42 @@ async function updateDeckFixture(page, groups, options = {}) {
     {
       textGroups: renderTextGroups(groups, "updated"),
       fixtureOptions: options,
+    },
+  );
+}
+
+/**
+ * @param {import("@playwright/test").Page} page
+ * @param {DeckGroup[]} groups
+ * @param {{
+ *   deckId: string,
+ *   startingView?: "visual" | "condensedTable",
+ *   replaceDeckDom?: boolean
+ * }} options
+ */
+async function navigateDeckFixture(page, groups, options) {
+  const { deckId, startingView = "visual", replaceDeckDom = true } = options;
+  await page.evaluate(
+    ({ nextDeckId, initialView, textGroups, shouldReplaceDeckDom, deckListHtml }) => {
+      const scope = /** @type {any} */ (globalThis);
+      scope.__deckFixture.textGroups = textGroups;
+      scope.__deckFixture.renderText = true;
+      scope.__deckFixture.failRestoration = false;
+      history.pushState({}, "", `/decks/${nextDeckId}`);
+      if (!shouldReplaceDeckDom) return;
+
+      const main = document.querySelector("main");
+      if (!main) throw new Error("Deck fixture has no main element.");
+      main.innerHTML = `<h1>Example deck ${nextDeckId}</h1>${deckListHtml}`;
+      scope.__deckFixture.renderDelay = 25;
+      scope.__bindDeckFixture(initialView);
+    },
+    {
+      nextDeckId: deckId,
+      initialView: startingView,
+      textGroups: renderTextGroups(groups, deckId),
+      shouldReplaceDeckDom: replaceDeckDom,
+      deckListHtml: renderDeckListShell(),
     },
   );
 }
@@ -581,6 +639,148 @@ test("fails closed on a Text-view render timeout and restores the original view"
   await expect(page.getByLabel("View")).toHaveValue("visual");
   await expect(page.getByText("Visual Grid deck", { exact: true })).toBeVisible();
   await expect(page.getByRole("region", { name: "Deck check result" })).toHaveCount(0);
+});
+
+test("shows one busy check while repeated clicks overlap", async ({ page }) => {
+  await mountDeck(
+    page,
+    [{ name: "Creatures", cards: [{ name: "Deck Card", quantity: 1 }] }],
+    { renderDelay: 250 },
+  );
+  await uploadCollection(page, [header, "1,Deck Card,TST,C,Common,0"].join("\n"));
+  const checkButton = page.getByRole("button", { name: "Check", exact: true });
+
+  await checkButton.click();
+  await expect(page.getByRole("button", { name: "Checking…", exact: true })).toBeDisabled();
+  await page.evaluate(() => {
+    document
+      .querySelector("#mtga-collection-helper button")
+      ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+
+  await expect(page.getByRole("region", { name: "Deck check result" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Check", exact: true })).toBeEnabled();
+  await expect(page.locator("#mtga-collection-helper")).toHaveCount(1);
+  await page.waitForTimeout(5_200);
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "Deck check result" })).toBeVisible();
+});
+
+test("replaces a successful result when checking again", async ({ page }) => {
+  await mountDeck(page, [
+    { name: "Creatures", cards: [{ name: "Deck Card", quantity: 2 }] },
+  ]);
+  await uploadCollection(page, [header, "1,Deck Card,TST,C,Common,0"].join("\n"));
+  await page.getByRole("button", { name: "Check", exact: true }).click();
+  const result = page.getByRole("region", { name: "Deck check result" });
+  await expect(result).toContainText("2 missing copies");
+
+  await updateDeckFixture(page, [
+    { name: "Creatures", cards: [{ name: "Deck Card", quantity: 1 }] },
+  ]);
+  await page.getByRole("button", { name: "Check", exact: true }).click();
+
+  await expect(result).toContainText("1 missing copies");
+  await expect(page.getByRole("region", { name: "Deck check result" })).toHaveCount(1);
+  await expect(page.locator("#mtga-collection-helper")).toHaveCount(1);
+});
+
+test("keeps the collection but clears deck state after in-page navigation", async ({
+  page,
+}) => {
+  await mountDeck(page, [
+    { name: "Creatures", cards: [{ name: "First Deck Card", quantity: 1 }] },
+  ]);
+  await uploadCollection(
+    page,
+    [header, "1,First Deck Card,TST,C,Common,0", "2,Second Deck Card,TST,C,Rare,0"].join(
+      "\n",
+    ),
+  );
+  await page.getByRole("button", { name: "Check", exact: true }).click();
+  await expect(page.getByRole("region", { name: "Deck check result" })).toContainText(
+    "First Deck Card",
+  );
+
+  await navigateDeckFixture(
+    page,
+    [{ name: "Creatures", cards: [{ name: "Second Deck Card", quantity: 1 }] }],
+    { deckId: "deck-two" },
+  );
+
+  const helper = page.locator("#mtga-collection-helper");
+  await expect(helper).toHaveCount(1);
+  await expect(helper).toContainText("collection.csv · 2 unique card names");
+  await expect(page.getByRole("button", { name: "Check", exact: true })).toBeEnabled();
+  await expect(page.getByRole("region", { name: "Deck check result" })).toHaveCount(0);
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await page.waitForTimeout(150);
+  await expect(page.getByRole("region", { name: "Deck check result" })).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Check", exact: true }).click();
+  await expect(page.getByRole("region", { name: "Deck check result" })).toContainText(
+    "Second Deck Card",
+  );
+  await expect(helper).toHaveCount(1);
+
+  await page.getByLabel("View").evaluate((view) => view.remove());
+  await page.getByRole("button", { name: "Check", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("Could not find Moxfield's View control");
+
+  await navigateDeckFixture(
+    page,
+    [{ name: "Creatures", cards: [{ name: "Second Deck Card", quantity: 1 }] }],
+    { deckId: "deck-three" },
+  );
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "Deck check result" })).toHaveCount(0);
+  await expect(helper).toContainText("collection.csv · 2 unique card names");
+
+  await page.evaluate(() => history.pushState({}, "", "/account"));
+  await expect(helper).toHaveCount(0);
+  await page.evaluate(() => history.pushState({}, "", "/decks/deck-four"));
+  await expect(helper).toHaveCount(1);
+  await expect(helper).toContainText("collection.csv · 2 unique card names");
+});
+
+test("discards an active check when navigating to another deck", async ({ page }) => {
+  await mountDeck(
+    page,
+    [{ name: "Creatures", cards: [{ name: "First Deck Card", quantity: 1 }] }],
+    { renderDelay: 250 },
+  );
+  await uploadCollection(
+    page,
+    [header, "1,First Deck Card,TST,C,Common,0", "2,Second Deck Card,TST,C,Rare,0"].join(
+      "\n",
+    ),
+  );
+  const checkButton = page.getByRole("button", { name: "Check", exact: true });
+
+  await checkButton.click();
+  await expect(page.getByRole("button", { name: "Checking…", exact: true })).toBeDisabled();
+  await expect(page.getByLabel("View")).toHaveValue("table");
+  await navigateDeckFixture(
+    page,
+    [{ name: "Creatures", cards: [{ name: "Second Deck Card", quantity: 1 }] }],
+    { deckId: "deck-two", replaceDeckDom: false },
+  );
+
+  await expect(checkButton).toBeEnabled();
+  await expect(page.getByLabel("View")).toHaveValue("visual");
+  await expect(page.getByText("Visual Grid deck", { exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Deck check result" })).toHaveCount(0);
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect(page.locator("#mtga-collection-helper")).toContainText(
+    "collection.csv · 2 unique card names",
+  );
+  await page.waitForTimeout(300);
+  await expect(page.getByRole("region", { name: "Deck check result" })).toHaveCount(0);
+
+  await checkButton.click();
+  await expect(page.getByRole("region", { name: "Deck check result" })).toContainText(
+    "Second Deck Card",
+  );
 });
 
 test("clears a previous result when later extraction fails", async ({ page }) => {

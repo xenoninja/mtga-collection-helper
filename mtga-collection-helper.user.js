@@ -76,11 +76,10 @@
 
   if (document.querySelector("#mtga-collection-helper")) return;
 
-  const deckList =
-    document.querySelector('[data-testid="deck-list"]') ??
-    document.querySelector('[aria-label="Deck list"]') ??
-    document.querySelector("main");
+  const deckList = findDeckListMount();
   if (!deckList?.parentElement) return;
+  let activeDeckPath = location.pathname;
+  let deckRevision = 0;
 
   const surface = document.createElement("section");
   surface.id = "mtga-collection-helper";
@@ -151,7 +150,7 @@
 
   controls.append(uploadLabel, checkButton);
   surface.append(title, controls, metadataElement, error, resultElement);
-  deckList.parentElement.insertBefore(surface, deckList);
+  syncSurface();
 
   const restoration = restoreSnapshot();
   let pendingWork = restoration;
@@ -178,6 +177,60 @@
     void handleCheck(activeSnapshot);
   });
 
+  const pushState = history.pushState;
+  history.pushState = function (data, unused, url) {
+    pushState.call(this, data, unused, url);
+    handleDeckNavigation();
+  };
+  const replaceState = history.replaceState;
+  history.replaceState = function (data, unused, url) {
+    replaceState.call(this, data, unused, url);
+    handleDeckNavigation();
+  };
+  window.addEventListener("popstate", handleDeckNavigation);
+  const deckObserver = new MutationObserver(() => {
+    handleDeckNavigation();
+    syncSurface();
+  });
+  deckObserver.observe(document.body, { childList: true, subtree: true });
+
+  function handleDeckNavigation() {
+    const nextDeckPath = location.pathname;
+    if (nextDeckPath === activeDeckPath) return;
+    activeDeckPath = nextDeckPath;
+    deckRevision += 1;
+    hideError();
+    clearResult();
+    syncSurface();
+  }
+
+  function syncSurface() {
+    if (!activeDeckPath.startsWith("/decks/")) {
+      surface.remove();
+      return;
+    }
+    mountSurface();
+  }
+
+  function mountSurface() {
+    const currentDeckList = findDeckListMount();
+    if (!currentDeckList?.parentElement) return;
+    if (
+      surface.parentElement !== currentDeckList.parentElement ||
+      surface.nextSibling !== currentDeckList
+    ) {
+      currentDeckList.parentElement.insertBefore(surface, currentDeckList);
+    }
+  }
+
+  function findDeckListMount() {
+    return (
+      document.querySelector('[data-testid="deck-list"]') ??
+      document.querySelector('[aria-label="Deck list"]') ??
+      document.querySelector("main")
+    );
+  }
+
   async function restoreSnapshot() {
     try {
       const stored = await tampermonkey.getValue(STORAGE_KEY, null);
@@ -202,6 +255,7 @@
 
   /** @param {CollectionSnapshot} snapshot */
   async function handleCheck(snapshot) {
+    const checkRevision = deckRevision;
     checkInProgress = true;
     checkButton.disabled = true;
     checkButton.textContent = "Checking…";
@@ -239,11 +293,15 @@
         }
       }
 
+      if (checkRevision !== deckRevision) return;
+
       if (checkFailure) throw checkFailure;
       if (!requirement) throw new Error("Could not read the rendered deck list.");
       renderResult(compareRequirement(requirement, snapshot));
     } catch (cause) {
-      showError(`Could not check this deck: ${errorMessage(cause)}`);
+      if (checkRevision === deckRevision) {
+        showError(`Could not check this deck: ${errorMessage(cause)}`);
+      }
     } finally {
       checkInProgress = false;
       checkButton.textContent = "Check";
