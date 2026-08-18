@@ -3,6 +3,7 @@
 // @namespace    https://github.com/xenoninja/mtga-collection-helper
 // @version      0.1.2
 // @description  Compare a Moxfield deck with a processed MTGA collection.
+// @author       xenoninja
 // @homepageURL  https://github.com/xenoninja/mtga-collection-helper
 // @downloadURL  https://raw.githubusercontent.com/xenoninja/mtga-collection-helper/master/mtga-collection-helper.user.js
 // @updateURL    https://raw.githubusercontent.com/xenoninja/mtga-collection-helper/master/mtga-collection-helper.user.js
