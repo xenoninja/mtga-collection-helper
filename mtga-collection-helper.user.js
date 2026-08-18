@@ -22,6 +22,32 @@
     "Rare",
     "Mythic",
   ]);
+  const INCLUDED_DECK_GROUPS = new Set([
+    "artifact",
+    "artifacts",
+    "battle",
+    "battles",
+    "commander",
+    "commanders",
+    "companion",
+    "companions",
+    "creature",
+    "creatures",
+    "enchantment",
+    "enchantments",
+    "instant",
+    "instants",
+    "land",
+    "lands",
+    "mainboard",
+    "partner",
+    "partners",
+    "planeswalker",
+    "planeswalkers",
+    "sideboard",
+    "sorceries",
+    "sorcery",
+  ]);
   const tampermonkey = /** @type {{
     getValue: (key: string, fallback: unknown) => Promise<unknown> | unknown,
     setValue: (key: string, value: unknown) => Promise<void> | void
@@ -315,14 +341,22 @@
 
     /** @type {Map<string, DeckRequirementEntry>} */
     const requirement = new Map();
+    const paintedRows = new Set();
     for (const list of lists) {
       const items = Array.from(list.children).filter(isVisible);
       const heading = items.shift();
-      const countMatch = heading?.textContent?.trim().match(/\((\d+)\)\s*$/u);
-      if (!heading || !countMatch) {
-        throw new Error("A visible deck group has no displayed card count.");
+      const headingMatch = heading?.textContent
+        ?.trim()
+        .match(/^(.+?)\s*\((\d+)\)\s*$/u);
+      if (!heading || !headingMatch) {
+        throw new Error("A visible deck group has no displayed heading and card count.");
       }
-      const displayedCount = Number(countMatch[1]);
+
+      const groupName = headingMatch[1].trim().replace(/\s+/gu, " ").toLowerCase();
+      if (!INCLUDED_DECK_GROUPS.has(groupName)) continue;
+
+      const displayedCount = Number(headingMatch[2]);
+      const groupHeading = headingMatch[1].trim();
       let extractedCount = 0;
       for (const row of items) {
         const cardLink = row.querySelector('a[href^="/cards/"]');
@@ -334,10 +368,20 @@
           throw new Error(`Could not read the quantity for "${cardLink.textContent.trim()}".`);
         }
 
+        const paintKey = row.getAttribute("data-hash")?.trim();
+        if (!paintKey) {
+          throw new Error(`Could not identify a painted row in the "${groupHeading}" group.`);
+        }
+        if (paintedRows.has(paintKey)) {
+          throw new Error(`The "${groupHeading}" group contains a duplicate painted row.`);
+        }
+        paintedRows.add(paintKey);
+
         const quantity = Number(quantityText);
         const name = cardLink.textContent.trim().replace(/\s+/gu, " ");
         const normalizedName = normalizeName(name);
         const existing = requirement.get(normalizedName);
+
         if (existing) existing.quantity += quantity;
         else requirement.set(normalizedName, { name, quantity });
         extractedCount += quantity;
