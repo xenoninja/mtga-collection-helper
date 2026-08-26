@@ -28,6 +28,14 @@
     "Rare",
     "Mythic",
   ]);
+  /** @type {Record<CraftRarity, number>} */
+  const CRAFT_RARITY_ORDER = {
+    Mythic: 0,
+    Rare: 1,
+    Uncommon: 2,
+    Common: 3,
+    Basic: 4,
+  };
   const FREE_BASIC_NAMES = new Set([
     "plains",
     "island",
@@ -554,7 +562,12 @@
       totalMissing += missing;
       wildcards[collectionCard.craftRarity] += missing;
     }
-    missingCards.sort((left, right) => left.name.localeCompare(right.name));
+    missingCards.sort((left, right) => {
+      const byRarity =
+        CRAFT_RARITY_ORDER[left.craftRarity] - CRAFT_RARITY_ORDER[right.craftRarity];
+      if (byRarity !== 0) return byRarity;
+      return left.name.localeCompare(right.name);
+    });
     unmatchedCards.sort((left, right) => left.name.localeCompare(right.name));
     return { totalMissing, missingCards, unmatchedCards, wildcards };
   }
