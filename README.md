@@ -28,6 +28,7 @@ Rules the userscript enforces:
 - `Rarity` is one of `Basic`, `Common`, `Uncommon`, `Rare`, `Mythic`.
 - `Count` is an integer from 0 through 4 (ownership already merged across printings).
 - Card names must be unique after normalization (trim, collapse whitespace, case-fold, Unicode punctuation, split-card separators).
+- `Name` is stored as written, so reports can show the spelling you would search for.
 - Quoted names with commas are valid (`"Avacyn, Angel of Hope"`).
 - The first invalid row rejects the whole file and leaves the previous snapshot unchanged.
 
@@ -51,6 +52,9 @@ Pass both paths. Bare invocation looks for `collection/collection_raw.csv` relat
 
 Replacing the on-disk CSV does not update Tampermonkey storage. Upload again after regenerating.
 
+Snapshots stored by a helper older than 0.2.0 use a format that did not keep card
+names. They are rejected on load with a prompt to upload the CSV again.
+
 ## Check a deck
 
 1. Open the Moxfield deck.
@@ -64,6 +68,10 @@ A successful check shows:
 - Wildcard counts for Common / Uncommon / Rare / Mythic
 - Expandable missing-card rows: name, required, owned, missing, craft rarity
 - Expandable unmatched rows: name, required, `Unknown`, `No collection match`
+
+Missing rows lead with the collection's name for the card, since that is what you
+search for when crafting. Where the deck printed something else, the printed name
+follows in parentheses: `Command Beacon (as "Balamb Garden")`.
 
 If the collection covers the imported deck: `Collection covers this deck. No missing copies.`
 
@@ -85,6 +93,30 @@ missing copies      = max(playset requirement − owned count, 0)
 Basic cards are free: Plains, Island, Swamp, Mountain, Forest, Wastes, Snow-Covered versions of the five colored basics, and any uploaded row with rarity `Basic`. They never appear in missing or unmatched results.
 
 Unmatched non-Basic names are listed separately and do not affect missing-copy or wildcard totals. Totals are crafting cost only — they do not subtract wildcard inventory.
+
+### Flavor-name printings
+
+Some printings print a name no other printing of the card uses — `Balamb Garden`
+for Command Beacon, `Astral Titan` for Primeval Titan. Name matching cannot place
+these, and loosening it is unsafe: `Balamb Garden` is one comma away from the real,
+unrelated `Balamb Garden, SeeD Academy`.
+
+So matching itself is unchanged, and only the rows it gives up on are re-examined.
+Each carries a Moxfield card link — `/cards/VBxeR-command-beacon` — whose slug
+names the card rather than the printing. The slug and every collection name are
+reduced to letters and digits (`dain-s-company` and `Dáin's Company` both become
+`dainscompany`) and looked up. Resolution is deliberately conservative:
+
+- A slug that resolves to nothing leaves the row unmatched, as before.
+- A slug claimed by two collection names resolves nothing; the row stays unmatched.
+- A resolved row merges into its card identity, so one `Balamb Garden` plus three
+  `Command Beacon` is a single four-copy requirement, not two.
+- A slug that names a free basic drops out silently, like any other basic.
+
+A flavor name that collides *exactly* with a different real card is still matched
+wrongly, because matching succeeds and the row never reaches this step. Verifying
+the slug on successful matches too would close it, at the cost of changing the
+matching rule itself; that is deliberately not done here.
 
 Extraction is fail-closed. A missing heading, unparseable quantity, duplicate visible row, count mismatch, ambiguous deck list, render timeout, or failed view restoration clears the previous result and shows an error instead of partial totals.
 
@@ -112,6 +144,7 @@ mtga-collection-helper.user.js   installable userscript
 tests/                           Playwright behavioral specs
 collection/                      local CSV + merge script (not tracked)
 CONTEXT.md                       domain glossary
+docs/adr/                        decision records (not tracked)
 .scratch/mtga-collection-helper/ product spec and tickets
 ```
 

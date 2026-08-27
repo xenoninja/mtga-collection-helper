@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MTGA Collection Helper
 // @namespace    https://github.com/xenoninja/mtga-collection-helper
-// @version      0.1.3
+// @version      0.2.0
 // @description  Compare a Moxfield deck with a processed MTGA collection.
 // @author       xenoninja
 // @homepageURL  https://github.com/xenoninja/mtga-collection-helper
@@ -19,6 +19,7 @@
   "use strict";
 
   const STORAGE_KEY = "mtga-collection-helper.collection-snapshot";
+  const SNAPSHOT_VERSION = 2;
   const EXPECTED_COLUMNS = ["Id", "Name", "Set", "Color", "Rarity", "Count"];
   /** @typedef {"Basic" | "Common" | "Uncommon" | "Rare" | "Mythic"} CraftRarity */
   const ALLOWED_RARITIES = new Set([
@@ -49,6 +50,9 @@
     "snow-covered mountain",
     "snow-covered forest",
   ]);
+  const FREE_BASIC_SLUG_KEYS = new Set(
+    Array.from(FREE_BASIC_NAMES, (basicName) => slugKey(basicName)),
+  );
   const INCLUDED_DECK_GROUPS = new Set([
     "artifact",
     "artifacts",
@@ -83,12 +87,13 @@
     GM
   );
 
-  /** @typedef {{count: number, craftRarity: CraftRarity}} CollectionEntry */
+  /** @typedef {{name: string, count: number, craftRarity: CraftRarity}} CollectionEntry */
   /** @typedef {{filename: string, uniqueNameCount: number, uploadedAt: string}} SnapshotMetadata */
-  /** @typedef {{version: 1, cards: Record<string, CollectionEntry>, metadata: SnapshotMetadata}} CollectionSnapshot */
-  /** @typedef {{name: string, quantity: number}} DeckRequirementEntry */
-  /** @typedef {{name: string, required: number, owned: number, missing: number, craftRarity: CraftRarity}} MissingCard */
+  /** @typedef {{version: 2, cards: Record<string, CollectionEntry>, metadata: SnapshotMetadata}} CollectionSnapshot */
+  /** @typedef {{name: string, slugKey: string, quantity: number}} DeckRequirementEntry */
+  /** @typedef {{name: string, printedNames: string[], required: number, owned: number, missing: number, craftRarity: CraftRarity}} MissingCard */
   /** @typedef {{name: string, required: number, craftRarity: "Unknown", reason: "No collection match"}} UnmatchedCard */
+  /** @typedef {{collectionCard: CollectionEntry, printedNames: string[], quantity: number}} MatchedIdentity */
   /** @typedef {{totalMissing: number, missingCards: MissingCard[], unmatchedCards: UnmatchedCard[], wildcards: Record<Exclude<CraftRarity, "Basic">, number>}} CheckResult */
 
   if (document.querySelector("#mtga-collection-helper")) return;
@@ -266,7 +271,15 @@
   async function restoreSnapshot() {
     try {
       const stored = await tampermonkey.getValue(STORAGE_KEY, null);
-      if (isSnapshot(stored)) setActiveSnapshot(stored);
+      if (isSnapshot(stored)) {
+        setActiveSnapshot(stored);
+        return;
+      }
+      if (stored) {
+        showError(
+          "The stored collection snapshot uses an older format. Upload the collection CSV again.",
+        );
+      }
     } catch (cause) {
       showError(`Could not restore the collection snapshot: ${errorMessage(cause)}`);
     }
@@ -510,7 +523,13 @@
         const existing = requirement.get(normalizedName);
 
         if (existing) existing.quantity += quantity;
-        else requirement.set(normalizedName, { name, quantity });
+        else {
+          requirement.set(normalizedName, {
+            name,
+            slugKey: linkSlugKey(cardLink.getAttribute("href")),
+            quantity,
+          });
+        }
         extractedCount += quantity;
       }
       if (extractedCount !== displayedCount) {
@@ -536,10 +555,48 @@
     const unmatchedCards = [];
     let totalMissing = 0;
 
+    /** @type {Map<string, MatchedIdentity>} */
+    const matched = new Map();
+    /** @type {DeckRequirementEntry[]} */
+    const unresolved = [];
+
+    /**
+     * @param {string} identity
+     * @param {CollectionEntry} collectionCard
+     * @param {DeckRequirementEntry} deckCard
+     */
+    function addMatch(identity, collectionCard, deckCard) {
+      const existing = matched.get(identity);
+      if (existing) {
+        existing.quantity += deckCard.quantity;
+        existing.printedNames.push(deckCard.name);
+        return;
+      }
+      matched.set(identity, {
+        collectionCard,
+        printedNames: [deckCard.name],
+        quantity: deckCard.quantity,
+      });
+    }
+
     for (const [normalizedName, deckCard] of requirement) {
       if (FREE_BASIC_NAMES.has(normalizedName)) continue;
       const collectionCard = snapshot.cards[normalizedName];
       if (!collectionCard) {
+        unresolved.push(deckCard);
+        continue;
+      }
+      addMatch(normalizedName, collectionCard, deckCard);
+    }
+
+    // A flavor-name printing prints a name the collection never uses, so it can
+    // only arrive here. Its card link still names the card, so resolve on that.
+    const slugIndex = unresolved.length > 0 ? buildSlugIndex(snapshot) : null;
+    for (const deckCard of unresolved) {
+      if (deckCard.slugKey && FREE_BASIC_SLUG_KEYS.has(deckCard.slugKey)) continue;
+      const identity = deckCard.slugKey ? slugIndex?.get(deckCard.slugKey) : undefined;
+      const collectionCard = identity ? snapshot.cards[identity] : undefined;
+      if (!identity || !collectionCard) {
         unmatchedCards.push({
           name: deckCard.name,
           required: deckCard.quantity,
@@ -548,12 +605,20 @@
         });
         continue;
       }
+      addMatch(identity, collectionCard, deckCard);
+    }
+
+    for (const [identity, match] of matched) {
+      const { collectionCard } = match;
       if (collectionCard.craftRarity === "Basic") continue;
-      const playsetRequirement = Math.min(deckCard.quantity, 4);
+      const playsetRequirement = Math.min(match.quantity, 4);
       const missing = Math.max(playsetRequirement - collectionCard.count, 0);
       if (missing === 0) continue;
       missingCards.push({
-        name: deckCard.name,
+        name: collectionCard.name,
+        printedNames: match.printedNames.filter(
+          (printedName) => normalizeName(printedName) !== identity,
+        ),
         required: playsetRequirement,
         owned: collectionCard.count,
         missing,
@@ -610,7 +675,13 @@
         `Missing card details (${result.missingCards.length})`,
         ["Card name", "Required", "Owned", "Missing", "Craft rarity"],
         result.missingCards,
-        (card) => [card.name, card.required, card.owned, card.missing, card.craftRarity],
+        (card) => [
+          formatMissingName(card),
+          card.required,
+          card.owned,
+          card.missing,
+          card.craftRarity,
+        ],
       );
     }
     if (result.unmatchedCards.length > 0) {
@@ -622,6 +693,19 @@
       );
     }
     resultElement.hidden = false;
+  }
+
+  /**
+   * Leads with the collection name, because that is what the player searches for
+   * when crafting, and notes any printed name that differs so the row can still
+   * be found in the deck list.
+   *
+   * @param {MissingCard} card
+   */
+  function formatMissingName(card) {
+    if (card.printedNames.length === 0) return card.name;
+    const printed = card.printedNames.map((printedName) => `"${printedName}"`).join(", ");
+    return `${card.name} (as ${printed})`;
   }
 
   /**
@@ -734,13 +818,14 @@
         throw new Error(`CSV row ${csvRow}: Count must be an integer from 0 through 4.`);
       }
       cards[normalizedName] = {
+        name: row[1].trim().replace(/\s+/gu, " "),
         count,
         craftRarity: /** @type {CraftRarity} */ (craftRarity),
       };
     }
 
     return {
-      version: 1,
+      version: SNAPSHOT_VERSION,
       cards,
       metadata: {
         filename,
@@ -760,6 +845,62 @@
       .trim()
       .replace(/\s+/gu, " ")
       .toLocaleLowerCase("en-US");
+  }
+
+  /**
+   * Reduces a card name or a card-link slug to the form both share: letters and
+   * digits only. Moxfield's own punctuation policy inside a slug is unknown and
+   * need not be guessed at, because this form discards all of it.
+   *
+   * @param {string} value
+   */
+  function slugKey(value) {
+    return value
+      .normalize("NFD")
+      .replace(/\p{Mn}/gu, "")
+      .toLocaleLowerCase("en-US")
+      .replace(/[^a-z0-9]+/gu, "");
+  }
+
+  /**
+   * Reads the card identity out of a Moxfield card link. The href is shaped
+   * `/cards/{id}-{slug}`, and the slug names the card even when the row's
+   * printed name does not.
+   *
+   * @param {string | null} href
+   * @returns {string} the slug key, or "" when the href carries no slug
+   */
+  function linkSlugKey(href) {
+    if (!href) return "";
+    const segment = href.split(/[?#]/u)[0].split("/").filter(Boolean).pop() ?? "";
+    const separator = segment.indexOf("-");
+    if (separator < 0) return "";
+    return slugKey(segment.slice(separator + 1));
+  }
+
+  /**
+   * Indexes the collection by slug key. A key claimed by two collection names is
+   * dropped rather than guessed at, so an ambiguous slug stays unmatched.
+   *
+   * @param {CollectionSnapshot} snapshot
+   * @returns {Map<string, string>} slug key to normalized collection name
+   */
+  function buildSlugIndex(snapshot) {
+    /** @type {Map<string, string>} */
+    const index = new Map();
+    /** @type {Set<string>} */
+    const ambiguous = new Set();
+    for (const normalizedName of Object.keys(snapshot.cards)) {
+      const key = slugKey(normalizedName);
+      if (!key || ambiguous.has(key)) continue;
+      if (index.has(key)) {
+        index.delete(key);
+        ambiguous.add(key);
+        continue;
+      }
+      index.set(key, normalizedName);
+    }
+    return index;
   }
 
   /**
@@ -878,7 +1019,7 @@
     if (!value || typeof value !== "object") return false;
     const candidate = /** @type {Partial<CollectionSnapshot>} */ (value);
     return (
-      candidate.version === 1 &&
+      candidate.version === SNAPSHOT_VERSION &&
       !!candidate.cards &&
       typeof candidate.cards === "object" &&
       !!candidate.metadata &&
