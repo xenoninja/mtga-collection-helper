@@ -158,6 +158,32 @@ test("uploads and restores a valid collection snapshot", async ({ page, context 
   await expect(restoredHelper.locator("time")).toHaveAttribute("datetime", /.+/);
 });
 
+test("reports a stored snapshot from the previous format instead of dropping it", async ({
+  page,
+}) => {
+  const storage = new Map([
+    [
+      "mtga-collection-helper.collection-snapshot",
+      {
+        version: 1,
+        cards: { "lightning bolt": { count: 4, craftRarity: "Common" } },
+        metadata: {
+          filename: "collection.csv",
+          uniqueNameCount: 1,
+          uploadedAt: new Date().toISOString(),
+        },
+      },
+    ],
+  ]);
+  await mountHelper(page, storage);
+  const helper = page.getByRole("region", { name: "MTGA Collection Helper" });
+
+  // Card links resolve against the collection's own spelling, which a version 1
+  // snapshot never stored, so it cannot be silently carried forward.
+  await expect(helper).toContainText("older format");
+  await expect(page.getByRole("button", { name: "Check", exact: true })).toBeDisabled();
+});
+
 test("a new valid upload replaces the active snapshot", async ({ page, context }) => {
   const storage = await mountHelper(page);
   const helper = page.getByRole("region", { name: "MTGA Collection Helper" });

@@ -9,7 +9,7 @@ const userscript = await readFile(
 const header = "Id,Name,Set,Color,Rarity,Count";
 
 /**
- * @typedef {{name: string, quantity: number | string, paintKey?: string}} DeckCard
+ * @typedef {{name: string, quantity: number | string, paintKey?: string, linkSlug?: string}} DeckCard
  * @typedef {{name?: string, cards: DeckCard[], displayedCount?: number, headingSuffix?: string}} DeckGroup
  * @typedef {{
  *   startingView?: "visual" | "condensedTable",
@@ -23,6 +23,21 @@ const header = "Id,Name,Set,Color,Rarity,Count";
  *   liveSemanticMount?: boolean
  * }} DeckOptions
  */
+
+/**
+ * Moxfield card links are shaped `/cards/{id}-{slug}`, where the slug names the
+ * card. A flavor-name printing prints one name and links another.
+ *
+ * @param {string} name
+ */
+function defaultLinkSlug(name) {
+  return name
+    .normalize("NFD")
+    .replace(/\p{Mn}/gu, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gu, "-")
+    .replace(/^-|-$/gu, "");
+}
 
 /**
  * @param {DeckGroup[]} groups
@@ -49,7 +64,9 @@ function renderTextGroups(groups, keyPrefix) {
           (card, cardIndex) => `
             <li data-hash="${card.paintKey ?? `${keyPrefix}-${groupIndex}-${cardIndex}`}">
               <div><div>${card.quantity}</div></div>
-              <div><a href="/cards/${keyPrefix}-${groupIndex}-${cardIndex}">${card.name}</a></div>
+              <div><a href="/cards/${keyPrefix}${groupIndex}${cardIndex}-${
+                card.linkSlug ?? defaultLinkSlug(card.name)
+              }">${card.name}</a></div>
             </li>`,
         )
         .join("");
@@ -722,6 +739,122 @@ test("reports aggregated unmatched cards separately from known requirements", as
     }),
   ).toBeVisible();
   await expect(result.getByText("Similar Cards", { exact: true })).toHaveCount(0);
+});
+
+test("resolves a flavor-name printing through its card link", async ({ page }) => {
+  await mountDeck(page, [
+    {
+      name: "Lands",
+      cards: [{ name: "Balamb Garden", quantity: 1, linkSlug: "command-beacon" }],
+    },
+  ]);
+  await uploadCollection(
+    page,
+    [
+      header,
+      "1,Command Beacon,FCA,Colorless,Rare,0",
+      '2,"Balamb Garden, SeeD Academy",FIN,Colorless,Rare,4',
+    ].join("\n"),
+  );
+
+  await page.getByRole("button", { name: "Check", exact: true }).click();
+
+  const result = page.getByRole("region", { name: "Deck check result" });
+  await expect(result).toContainText("1 missing copies across 1 distinct missing cards.");
+  await expect(result.getByText(/Unmatched card details/i)).toHaveCount(0);
+  await result.getByText("Missing card details (1)", { exact: true }).click();
+  await expect(result.locator("tbody tr")).toHaveCount(1);
+  await expect(result.locator("tbody tr")).toContainText('Command Beacon (as "Balamb Garden")');
+});
+
+test("aggregates a flavor-name printing with the same card printed normally", async ({
+  page,
+}) => {
+  await mountDeck(page, [
+    {
+      name: "Lands",
+      cards: [
+        { name: "Balamb Garden", quantity: 1, linkSlug: "command-beacon" },
+        { name: "Command Beacon", quantity: 3 },
+      ],
+    },
+  ]);
+  await uploadCollection(page, [header, "1,Command Beacon,FCA,Colorless,Rare,0"].join("\n"));
+
+  await page.getByRole("button", { name: "Check", exact: true }).click();
+
+  const result = page.getByRole("region", { name: "Deck check result" });
+  // A playset caps at four however the four copies were printed.
+  await expect(result).toContainText("4 missing copies across 1 distinct missing cards.");
+  await result.getByText("Missing card details (1)", { exact: true }).click();
+  await expect(result.locator("tbody tr")).toHaveCount(1);
+  await expect(result.locator("tbody tr")).toContainText('Command Beacon (as "Balamb Garden")');
+  await expect(result.locator("tbody tr")).toContainText("4");
+});
+
+test("resolves a card link slug across punctuation the collection name carries", async ({
+  page,
+}) => {
+  await mountDeck(page, [
+    {
+      name: "Creatures",
+      cards: [{ name: "Company of Dwarves", quantity: 2, linkSlug: "dains-company" }],
+    },
+  ]);
+  await uploadCollection(page, [header, "1,D\u00e1in's Company,LTR,Red,Rare,0"].join("\n"));
+
+  await page.getByRole("button", { name: "Check", exact: true }).click();
+
+  const result = page.getByRole("region", { name: "Deck check result" });
+  await expect(result).toContainText("2 missing copies across 1 distinct missing cards.");
+  await result.getByText("Missing card details (1)", { exact: true }).click();
+  await expect(result.locator("tbody tr")).toContainText(
+    'D\u00e1in\'s Company (as "Company of Dwarves")',
+  );
+});
+
+test("treats a flavor-named basic land as free once its link resolves", async ({ page }) => {
+  await mountDeck(page, [
+    {
+      name: "Lands",
+      cards: [{ name: "Wooded Grove", quantity: 20, linkSlug: "forest" }],
+    },
+  ]);
+  await uploadCollection(page, [header, "1,Lightning Bolt,TST,Red,Common,4"].join("\n"));
+
+  await page.getByRole("button", { name: "Check", exact: true }).click();
+
+  const result = page.getByRole("region", { name: "Deck check result" });
+  await expect(result).toContainText("Collection covers this deck. No missing copies.");
+  await expect(result.getByText(/card details/i)).toHaveCount(0);
+});
+
+test("leaves a card unmatched when its link slug is ambiguous or unknown", async ({ page }) => {
+  await mountDeck(page, [
+    {
+      name: "Creatures",
+      cards: [
+        { name: "Frostburn", quantity: 1, linkSlug: "fire-ice" },
+        { name: "Paper Only", quantity: 2, linkSlug: "paper-only" },
+      ],
+    },
+  ]);
+  await uploadCollection(
+    page,
+    [header, "1,Fire // Ice,APC,Red,Rare,0", "2,Fire Ice,TST,Red,Rare,0"].join("\n"),
+  );
+
+  await page.getByRole("button", { name: "Check", exact: true }).click();
+
+  const result = page.getByRole("region", { name: "Deck check result" });
+  await expect(result).toContainText("0 missing copies across 0 distinct missing cards.");
+  await result.getByText("Unmatched card details (2)", { exact: true }).click();
+  await expect(
+    result.getByRole("row", { name: "Frostburn 1 Unknown No collection match" }),
+  ).toBeVisible();
+  await expect(
+    result.getByRole("row", { name: "Paper Only 2 Unknown No collection match" }),
+  ).toBeVisible();
 });
 
 const extractionFailures = [
