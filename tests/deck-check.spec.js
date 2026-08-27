@@ -9,7 +9,7 @@ const userscript = await readFile(
 const header = "Id,Name,Set,Color,Rarity,Count";
 
 /**
- * @typedef {{name: string, quantity: number | string, paintKey?: string, linkSlug?: string}} DeckCard
+ * @typedef {{name: string, quantity: number | string, paintKey?: string, linkSlug?: string, linkId?: string}} DeckCard
  * @typedef {{name?: string, cards: DeckCard[], displayedCount?: number, headingSuffix?: string}} DeckGroup
  * @typedef {{
  *   startingView?: "visual" | "condensedTable",
@@ -64,9 +64,9 @@ function renderTextGroups(groups, keyPrefix) {
           (card, cardIndex) => `
             <li data-hash="${card.paintKey ?? `${keyPrefix}-${groupIndex}-${cardIndex}`}">
               <div><div>${card.quantity}</div></div>
-              <div><a href="/cards/${keyPrefix}${groupIndex}${cardIndex}-${
-                card.linkSlug ?? defaultLinkSlug(card.name)
-              }">${card.name}</a></div>
+              <div><a href="/cards/${
+                card.linkId ?? `${keyPrefix}${groupIndex}${cardIndex}`
+              }-${card.linkSlug ?? defaultLinkSlug(card.name)}">${card.name}</a></div>
             </li>`,
         )
         .join("");
@@ -774,7 +774,7 @@ test("aggregates a flavor-name printing with the same card printed normally", as
     {
       name: "Lands",
       cards: [
-        { name: "Balamb Garden", quantity: 1, linkSlug: "command-beacon" },
+        { name: "Balamb Garden", quantity: 2, linkSlug: "command-beacon" },
         { name: "Command Beacon", quantity: 3 },
       ],
     },
@@ -784,12 +784,70 @@ test("aggregates a flavor-name printing with the same card printed normally", as
   await page.getByRole("button", { name: "Check", exact: true }).click();
 
   const result = page.getByRole("region", { name: "Deck check result" });
-  // A playset caps at four however the four copies were printed.
+  // Five copies asked for, capped to a playset of four. Anything that skipped the
+  // merge would report five, or two separate requirements.
   await expect(result).toContainText("4 missing copies across 1 distinct missing cards.");
   await result.getByText("Missing card details (1)", { exact: true }).click();
   await expect(result.locator("tbody tr")).toHaveCount(1);
   await expect(result.locator("tbody tr")).toContainText('Command Beacon (as "Balamb Garden")');
   await expect(result.locator("tbody tr")).toContainText("4");
+});
+
+test("merges two flavor-name printings of the same card", async ({ page }) => {
+  await mountDeck(page, [
+    {
+      name: "Lands",
+      cards: [
+        { name: "Balamb Garden", quantity: 3, linkSlug: "command-beacon" },
+        { name: "Midgar Beacon", quantity: 3, linkSlug: "command-beacon" },
+      ],
+    },
+  ]);
+  await uploadCollection(page, [header, "1,Command Beacon,FCA,Colorless,Rare,1"].join("\n"));
+
+  await page.getByRole("button", { name: "Check", exact: true }).click();
+
+  const result = page.getByRole("region", { name: "Deck check result" });
+  await expect(result).toContainText("3 missing copies across 1 distinct missing cards.");
+  await result.getByText("Missing card details (1)", { exact: true }).click();
+  await expect(result.locator("tbody tr")).toHaveCount(1);
+  await expect(result.locator("tbody tr")).toContainText(
+    'Command Beacon (as "Balamb Garden", "Midgar Beacon")',
+  );
+});
+
+test("treats a resolved row at Basic craft rarity as free", async ({ page }) => {
+  await mountDeck(page, [
+    {
+      name: "Lands",
+      cards: [{ name: "Esthar Sky Plate", quantity: 12, linkSlug: "special-basic" }],
+    },
+  ]);
+  await uploadCollection(page, [header, "1,Special Basic,TST,Colorless,Basic,0"].join("\n"));
+
+  await page.getByRole("button", { name: "Check", exact: true }).click();
+
+  const result = page.getByRole("region", { name: "Deck check result" });
+  await expect(result).toContainText("Collection covers this deck. No missing copies.");
+  await expect(result.getByText(/card details/i)).toHaveCount(0);
+});
+
+test("resolves a card link whose id contains a hyphen", async ({ page }) => {
+  await mountDeck(page, [
+    {
+      name: "Lands",
+      cards: [
+        { name: "Balamb Garden", quantity: 1, linkSlug: "command-beacon", linkId: "VB-xeR" },
+      ],
+    },
+  ]);
+  await uploadCollection(page, [header, "1,Command Beacon,FCA,Colorless,Rare,0"].join("\n"));
+
+  await page.getByRole("button", { name: "Check", exact: true }).click();
+
+  const result = page.getByRole("region", { name: "Deck check result" });
+  await expect(result).toContainText("1 missing copies across 1 distinct missing cards.");
+  await expect(result.getByText(/Unmatched card details/i)).toHaveCount(0);
 });
 
 test("resolves a card link slug across punctuation the collection name carries", async ({

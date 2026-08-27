@@ -87,12 +87,12 @@
     GM
   );
 
-  /** @typedef {{name: string, count: number, craftRarity: CraftRarity}} CollectionEntry */
+  /** @typedef {{collectionName: string, count: number, craftRarity: CraftRarity}} CollectionEntry */
   /** @typedef {{filename: string, uniqueNameCount: number, uploadedAt: string}} SnapshotMetadata */
   /** @typedef {{version: 2, cards: Record<string, CollectionEntry>, metadata: SnapshotMetadata}} CollectionSnapshot */
-  /** @typedef {{name: string, slugKey: string, quantity: number}} DeckRequirementEntry */
-  /** @typedef {{name: string, printedNames: string[], required: number, owned: number, missing: number, craftRarity: CraftRarity}} MissingCard */
-  /** @typedef {{name: string, required: number, craftRarity: "Unknown", reason: "No collection match"}} UnmatchedCard */
+  /** @typedef {{printedName: string, slugKeys: string[], quantity: number}} DeckRequirementEntry */
+  /** @typedef {{collectionName: string, printedNames: string[], required: number, owned: number, missing: number, craftRarity: CraftRarity}} MissingCard */
+  /** @typedef {{printedName: string, required: number, craftRarity: "Unknown", reason: "No collection match"}} UnmatchedCard */
   /** @typedef {{collectionCard: CollectionEntry, printedNames: string[], quantity: number}} MatchedIdentity */
   /** @typedef {{totalMissing: number, missingCards: MissingCard[], unmatchedCards: UnmatchedCard[], wildcards: Record<Exclude<CraftRarity, "Basic">, number>}} CheckResult */
 
@@ -275,9 +275,13 @@
         setActiveSnapshot(stored);
         return;
       }
-      if (stored) {
+      if (isOutdatedSnapshot(stored)) {
         showError(
           "The stored collection snapshot uses an older format. Upload the collection CSV again.",
+        );
+      } else if (stored) {
+        showError(
+          "The stored collection snapshot could not be read. Upload the collection CSV again.",
         );
       }
     } catch (cause) {
@@ -490,7 +494,7 @@
         throw new Error("A visible deck group has no displayed heading and card count.");
       }
 
-      const groupName = headingMatch[1].trim().replace(/\s+/gu, " ").toLowerCase();
+      const groupName = collapseWhitespace(headingMatch[1]).toLowerCase();
       if (!INCLUDED_DECK_GROUPS.has(groupName)) continue;
       const paintedRows = paintedRowsByGroup.get(groupName) ?? new Set();
       paintedRowsByGroup.set(groupName, paintedRows);
@@ -518,15 +522,15 @@
         paintedRows.add(paintKey);
 
         const quantity = Number(quantityText);
-        const name = cardLink.textContent.trim().replace(/\s+/gu, " ");
-        const normalizedName = normalizeName(name);
+        const printedName = collapseWhitespace(cardLink.textContent);
+        const normalizedName = normalizeName(printedName);
         const existing = requirement.get(normalizedName);
 
         if (existing) existing.quantity += quantity;
         else {
           requirement.set(normalizedName, {
-            name,
-            slugKey: linkSlugKey(cardLink.getAttribute("href")),
+            printedName,
+            slugKeys: linkSlugKeys(cardLink.getAttribute("href")),
             quantity,
           });
         }
@@ -560,52 +564,35 @@
     /** @type {DeckRequirementEntry[]} */
     const unresolved = [];
 
-    /**
-     * @param {string} identity
-     * @param {CollectionEntry} collectionCard
-     * @param {DeckRequirementEntry} deckCard
-     */
-    function addMatch(identity, collectionCard, deckCard) {
-      const existing = matched.get(identity);
-      if (existing) {
-        existing.quantity += deckCard.quantity;
-        existing.printedNames.push(deckCard.name);
-        return;
-      }
-      matched.set(identity, {
-        collectionCard,
-        printedNames: [deckCard.name],
-        quantity: deckCard.quantity,
-      });
-    }
-
     for (const [normalizedName, deckCard] of requirement) {
-      if (FREE_BASIC_NAMES.has(normalizedName)) continue;
+      // A flavor-named basic prints a name the free list does not carry, so the
+      // card link has to be consulted before the row can be called non-basic.
+      if (isFreeBasic(normalizedName, deckCard.slugKeys)) continue;
       const collectionCard = snapshot.cards[normalizedName];
       if (!collectionCard) {
         unresolved.push(deckCard);
         continue;
       }
-      addMatch(normalizedName, collectionCard, deckCard);
+      addMatch(matched, normalizedName, collectionCard, deckCard);
     }
 
     // A flavor-name printing prints a name the collection never uses, so it can
     // only arrive here. Its card link still names the card, so resolve on that.
-    const slugIndex = unresolved.length > 0 ? buildSlugIndex(snapshot) : null;
+    /** @type {Map<string, string>} */
+    const slugIndex = unresolved.length > 0 ? buildSlugIndex(snapshot) : new Map();
     for (const deckCard of unresolved) {
-      if (deckCard.slugKey && FREE_BASIC_SLUG_KEYS.has(deckCard.slugKey)) continue;
-      const identity = deckCard.slugKey ? slugIndex?.get(deckCard.slugKey) : undefined;
+      const identity = resolveIdentity(deckCard, slugIndex);
       const collectionCard = identity ? snapshot.cards[identity] : undefined;
       if (!identity || !collectionCard) {
         unmatchedCards.push({
-          name: deckCard.name,
+          printedName: deckCard.printedName,
           required: deckCard.quantity,
           craftRarity: "Unknown",
           reason: "No collection match",
         });
         continue;
       }
-      addMatch(identity, collectionCard, deckCard);
+      addMatch(matched, identity, collectionCard, deckCard);
     }
 
     for (const [identity, match] of matched) {
@@ -615,7 +602,9 @@
       const missing = Math.max(playsetRequirement - collectionCard.count, 0);
       if (missing === 0) continue;
       missingCards.push({
-        name: collectionCard.name,
+        collectionName: collectionCard.collectionName,
+        // A row that printed the collection's own name adds nothing to report,
+        // so only the printings that spell the card differently are listed.
         printedNames: match.printedNames.filter(
           (printedName) => normalizeName(printedName) !== identity,
         ),
@@ -631,9 +620,11 @@
       const byRarity =
         CRAFT_RARITY_ORDER[left.craftRarity] - CRAFT_RARITY_ORDER[right.craftRarity];
       if (byRarity !== 0) return byRarity;
-      return left.name.localeCompare(right.name);
+      return left.collectionName.localeCompare(right.collectionName);
     });
-    unmatchedCards.sort((left, right) => left.name.localeCompare(right.name));
+    unmatchedCards.sort((left, right) =>
+      left.printedName.localeCompare(right.printedName),
+    );
     return { totalMissing, missingCards, unmatchedCards, wildcards };
   }
 
@@ -689,7 +680,7 @@
         `Unmatched card details (${result.unmatchedCards.length})`,
         ["Card name", "Required", "Craft rarity", "Reason"],
         result.unmatchedCards,
-        (card) => [card.name, card.required, card.craftRarity, card.reason],
+        (card) => [card.printedName, card.required, card.craftRarity, card.reason],
       );
     }
     resultElement.hidden = false;
@@ -703,9 +694,9 @@
    * @param {MissingCard} card
    */
   function formatMissingName(card) {
-    if (card.printedNames.length === 0) return card.name;
+    if (card.printedNames.length === 0) return card.collectionName;
     const printed = card.printedNames.map((printedName) => `"${printedName}"`).join(", ");
-    return `${card.name} (as ${printed})`;
+    return `${card.collectionName} (as ${printed})`;
   }
 
   /**
@@ -818,7 +809,7 @@
         throw new Error(`CSV row ${csvRow}: Count must be an integer from 0 through 4.`);
       }
       cards[normalizedName] = {
-        name: row[1].trim().replace(/\s+/gu, " "),
+        collectionName: collapseWhitespace(row[1]),
         count,
         craftRarity: /** @type {CraftRarity} */ (craftRarity),
       };
@@ -833,6 +824,11 @@
         uploadedAt,
       },
     };
+  }
+
+  /** @param {string} value */
+  function collapseWhitespace(value) {
+    return value.trim().replace(/\s+/gu, " ");
   }
 
   /** @param {string} value */
@@ -867,15 +863,82 @@
    * `/cards/{id}-{slug}`, and the slug names the card even when the row's
    * printed name does not.
    *
+   * Where the id itself contains a hyphen the boundary is not observable, so
+   * every split point is offered as a candidate. A candidate only counts when it
+   * equals a whole collection name, and `resolveIdentity` discards a set that
+   * names two different cards, so guessing wide stays safe.
+   *
+   * Absence of a slug is not a DOM fault the way a missing name or quantity is —
+   * it withholds evidence rather than contradicting it — so this returns an empty
+   * candidate list and the row simply stays unmatched, instead of throwing.
+   *
    * @param {string | null} href
-   * @returns {string} the slug key, or "" when the href carries no slug
+   * @returns {string[]} candidate slug keys, nearest-first
    */
-  function linkSlugKey(href) {
-    if (!href) return "";
+  function linkSlugKeys(href) {
+    if (!href) return [];
     const segment = href.split(/[?#]/u)[0].split("/").filter(Boolean).pop() ?? "";
-    const separator = segment.indexOf("-");
-    if (separator < 0) return "";
-    return slugKey(segment.slice(separator + 1));
+    /** @type {string[]} */
+    const keys = [];
+    for (
+      let index = segment.indexOf("-");
+      index >= 0;
+      index = segment.indexOf("-", index + 1)
+    ) {
+      const key = slugKey(segment.slice(index + 1));
+      if (key && !keys.includes(key)) keys.push(key);
+    }
+    return keys;
+  }
+
+  /**
+   * @param {string} normalizedName
+   * @param {string[]} slugKeys
+   */
+  function isFreeBasic(normalizedName, slugKeys) {
+    if (FREE_BASIC_NAMES.has(normalizedName)) return true;
+    return slugKeys.some((key) => FREE_BASIC_SLUG_KEYS.has(key));
+  }
+
+  /**
+   * Picks the one card identity a row's candidate slug keys agree on. Candidates
+   * that name nothing are ignored; candidates that name two different cards
+   * resolve nothing.
+   *
+   * @param {DeckRequirementEntry} deckCard
+   * @param {Map<string, string>} slugIndex
+   * @returns {string | undefined}
+   */
+  function resolveIdentity(deckCard, slugIndex) {
+    /** @type {string | undefined} */
+    let resolved;
+    for (const key of deckCard.slugKeys) {
+      const identity = slugIndex.get(key);
+      if (!identity) continue;
+      if (resolved !== undefined && resolved !== identity) return undefined;
+      resolved = identity;
+    }
+    return resolved;
+  }
+
+  /**
+   * @param {Map<string, MatchedIdentity>} matched
+   * @param {string} identity
+   * @param {CollectionEntry} collectionCard
+   * @param {DeckRequirementEntry} deckCard
+   */
+  function addMatch(matched, identity, collectionCard, deckCard) {
+    const existing = matched.get(identity);
+    if (existing) {
+      existing.quantity += deckCard.quantity;
+      existing.printedNames.push(deckCard.printedName);
+      return;
+    }
+    matched.set(identity, {
+      collectionCard,
+      printedNames: [deckCard.printedName],
+      quantity: deckCard.quantity,
+    });
   }
 
   /**
@@ -1012,6 +1075,13 @@
   /** @param {unknown} cause */
   function errorMessage(cause) {
     return cause instanceof Error ? cause.message : String(cause);
+  }
+
+  /** @param {unknown} value */
+  function isOutdatedSnapshot(value) {
+    if (!value || typeof value !== "object" || !("version" in value)) return false;
+    const version = /** @type {{version: unknown}} */ (value).version;
+    return Number.isInteger(version) && version !== SNAPSHOT_VERSION;
   }
 
   /** @param {unknown} value @returns {value is CollectionSnapshot} */

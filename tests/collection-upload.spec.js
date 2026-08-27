@@ -6,6 +6,7 @@ const userscript = await readFile(
   "utf8",
 );
 
+const storageKey = "mtga-collection-helper.collection-snapshot";
 const validHeader = ["Id", "Name", "Set", "Color", "Rarity", "Count"].join(",");
 const validCsv = [
   `\uFEFF${validHeader}`,
@@ -163,7 +164,7 @@ test("reports a stored snapshot from the previous format instead of dropping it"
 }) => {
   const storage = new Map([
     [
-      "mtga-collection-helper.collection-snapshot",
+      storageKey,
       {
         version: 1,
         cards: { "lightning bolt": { count: 4, craftRarity: "Common" } },
@@ -181,6 +182,18 @@ test("reports a stored snapshot from the previous format instead of dropping it"
   // Card links resolve against the collection's own spelling, which a version 1
   // snapshot never stored, so it cannot be silently carried forward.
   await expect(helper).toContainText("older format");
+  await expect(page.getByRole("button", { name: "Check", exact: true })).toBeDisabled();
+});
+
+test("distinguishes unreadable stored data from an older snapshot format", async ({
+  page,
+}) => {
+  const storage = new Map([[storageKey, { cards: "not a snapshot" }]]);
+  await mountHelper(page, storage);
+  const helper = page.getByRole("region", { name: "MTGA Collection Helper" });
+
+  await expect(helper).toContainText("could not be read");
+  await expect(helper).not.toContainText("older format");
   await expect(page.getByRole("button", { name: "Check", exact: true })).toBeDisabled();
 });
 
