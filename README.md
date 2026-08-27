@@ -28,7 +28,7 @@ Rules the userscript enforces:
 - `Rarity` is one of `Basic`, `Common`, `Uncommon`, `Rare`, `Mythic`.
 - `Count` is an integer from 0 through 4 (ownership already merged across printings).
 - Card names must be unique after normalization (trim, collapse whitespace, case-fold, Unicode punctuation, split-card separators).
-- `Name` is stored as written, so reports can show the spelling you would search for.
+- `Name` is stored with only surrounding and repeated whitespace collapsed, so reports can show the spelling you would search for.
 - Quoted names with commas are valid (`"Avacyn, Angel of Hope"`).
 - The first invalid row rejects the whole file and leaves the previous snapshot unchanged.
 
@@ -105,10 +105,13 @@ So matching itself is unchanged, and only the rows it gives up on are re-examine
 Each carries a Moxfield card link — `/cards/VBxeR-command-beacon` — whose slug
 names the card rather than the printing. The slug and every collection name are
 reduced to letters and digits (`dain-s-company` and `Dáin's Company` both become
-`dainscompany`) and looked up. Resolution is deliberately conservative:
+`dainscompany`) and looked up. Where the id itself contains a hyphen the boundary
+is not observable, so every split point is tried. Resolution is deliberately
+conservative:
 
 - A slug that resolves to nothing leaves the row unmatched, as before.
 - A slug claimed by two collection names resolves nothing; the row stays unmatched.
+- Split points that disagree about which card is named resolve nothing.
 - A resolved row merges into its card identity, so one `Balamb Garden` plus three
   `Command Beacon` is a single four-copy requirement, not two.
 - A slug that names a free basic drops out silently, like any other basic.
